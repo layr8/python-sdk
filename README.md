@@ -329,6 +329,14 @@ An interactive chat client for DIDComm basic messaging. Demonstrates fire-and-fo
 LAYR8_API_KEY=your-key python examples/chat.py did:web:friend:chat-agent
 ```
 
+### Durable Handler
+
+Persist-then-ack pattern: writes inbound messages to a JSON-lines file before acknowledging. If the process crashes before ack, the cloud-node redelivers. Demonstrates `manual_ack` with zero external dependencies.
+
+```bash
+LAYR8_API_KEY=your-key python examples/durable_handler.py
+```
+
 ## Development
 
 ### Prerequisites
