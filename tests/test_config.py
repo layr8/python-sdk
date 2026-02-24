@@ -39,6 +39,20 @@ class TestResolveConfig:
         with pytest.raises(Layr8Error, match="api_key is required"):
             resolve_config(Config(node_url="ws://localhost:4000"))
 
+    def test_normalizes_https_to_wss(self) -> None:
+        cfg = resolve_config(Config(
+            node_url="https://mynode.layr8.cloud/plugin_socket/websocket",
+            api_key="key",
+        ))
+        assert cfg.node_url == "wss://mynode.layr8.cloud/plugin_socket/websocket"
+
+    def test_normalizes_http_to_ws(self) -> None:
+        cfg = resolve_config(Config(
+            node_url="http://localhost:4000/plugin_socket/websocket",
+            api_key="key",
+        ))
+        assert cfg.node_url == "ws://localhost:4000/plugin_socket/websocket"
+
     def test_allows_empty_agent_did(self) -> None:
         cfg = resolve_config(Config(node_url="ws://localhost:4000", api_key="key"))
         assert cfg.agent_did == ""

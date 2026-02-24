@@ -43,6 +43,14 @@ def resolve_config(cfg: Config) -> ResolvedConfig:
         raise Layr8Error(
             "node_url is required (set in Config or LAYR8_NODE_URL env)"
         )
+
+    # Normalize HTTP(S) URLs to WebSocket scheme.
+    # In production, the /plugin_socket endpoint serves WebSocket over HTTPS.
+    if node_url.startswith("https://"):
+        node_url = "wss://" + node_url.removeprefix("https://")
+    elif node_url.startswith("http://"):
+        node_url = "ws://" + node_url.removeprefix("http://")
+
     if not api_key:
         raise Layr8Error(
             "api_key is required (set in Config or LAYR8_API_KEY env)"
