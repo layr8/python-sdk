@@ -448,6 +448,39 @@ class TestClient:
 
         await client.close()
 
+    async def test_join_rejected_includes_reason(self, mock_server: MockPhoenixServer) -> None:
+        def handler(msg: dict[str, Any]) -> None:
+            if msg["event"] == "phx_join":
+                asyncio.ensure_future(
+                    mock_server.send_to_client(
+                        msg["ref"],
+                        msg["ref"],
+                        msg["topic"],
+                        "phx_reply",
+                        {
+                            "status": "error",
+                            "response": {
+                                "reason": "e.connect.plugin.failed: protocols_already_bound",
+                            },
+                        },
+                    )
+                )
+
+        mock_server.on_msg = handler
+
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="did:web:test",
+        ))
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def echo(msg: Message) -> None:
+            return None
+
+        with pytest.raises(Exception, match="protocols_already_bound"):
+            await client.connect()
+
     async def test_async_context_manager(
         self, mock_server: MockPhoenixServer
     ) -> None:

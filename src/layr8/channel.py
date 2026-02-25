@@ -132,6 +132,10 @@ class PhoenixChannel:
 
         status = reply.get("status")
         if status != "ok":
+            response = reply.get("response", {})
+            reason = response.get("reason", "") if isinstance(response, dict) else ""
+            if reason:
+                raise _make_connection_error(self._ws_url, reason)
             raise _make_connection_error(
                 self._ws_url, f"join rejected: {status}"
             )
