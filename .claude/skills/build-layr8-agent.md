@@ -10,7 +10,7 @@ Full documentation: https://docs.layr8.io/reference/python-sdk
 ## Import
 
 ```python
-from layr8 import Client, Config, Message
+from layr8 import Client, Config, Message, log_errors
 ```
 
 Requires Python 3.11+. The SDK is fully async, built on `asyncio` and `websockets`.
@@ -22,10 +22,16 @@ client = Client(Config(
     node_url="ws://mynode.localhost/plugin_socket/websocket",
     api_key="my_api_key",
     agent_did="did:web:mynode.localhost:my-agent",
-))
+), log_errors())
 ```
 
-All fields fall back to environment variables if empty:
+The `Client` constructor takes two required arguments:
+1. `Config(...)` — connection configuration
+2. `on_error` — a `Callable[[SDKError], None]` that receives all SDK-level errors
+
+Use `log_errors()` for a convenient default that logs errors via `logging.getLogger("layr8")`.
+
+All Config fields fall back to environment variables if empty:
 - `node_url`  → `LAYR8_NODE_URL`
 - `api_key`   → `LAYR8_API_KEY`
 - `agent_did` → `LAYR8_AGENT_DID`
@@ -35,13 +41,13 @@ All fields fall back to environment variables if empty:
 ## Lifecycle
 
 ```
-Client(Config) → handle (register handlers) → connect → ... → close
+Client(Config, on_error) → handle (register handlers) → connect → ... → close
 ```
 
 Or using the async context manager:
 
 ```
-Client(Config) → handle → async with client: ...
+Client(Config, on_error) → handle → async with client: ...
 ```
 
 - `handle` must be called BEFORE `connect` — raises `AlreadyConnectedError` after.
@@ -87,7 +93,9 @@ The protocol base URI is derived automatically from the message type
 
 ## Sending Messages
 
-### Fire-and-forget
+### Send (with server ack)
+
+By default, `send()` waits for the server to acknowledge receipt. If the server rejects the message, a `RuntimeError` is raised.
 
 ```python
 await client.send(Message(
@@ -95,6 +103,21 @@ await client.send(Message(
     to=["did:web:other-node:agent"],
     body={"content": "Hello!"},
 ))
+```
+
+### Fire-and-forget
+
+To skip waiting for the server acknowledgment, pass `fire_and_forget=True`:
+
+```python
+await client.send(
+    Message(
+        type="https://didcomm.org/basicmessage/2.0/message",
+        to=["did:web:other-node:agent"],
+        body={"content": "Hello!"},
+    ),
+    fire_and_forget=True,
+)
 ```
 
 ### Request/Response
@@ -179,6 +202,26 @@ resp = await client.request(msg, parent_thread="parent-thread-id", timeout=10.0)
 
 ## Error Handling
 
+### ErrorHandler (on_error callback)
+
+The `on_error` callback receives `SDKError` instances for all SDK-level errors:
+
+```python
+from layr8 import SDKError, ErrorKind
+
+def my_handler(err: SDKError) -> None:
+    print(f"[{err.kind.value}] {err.cause}")
+
+client = Client(Config(...), my_handler)
+```
+
+`ErrorKind` values:
+- `PARSE_FAILURE` — inbound message could not be parsed
+- `NO_HANDLER` — no handler registered for the message type
+- `HANDLER_EXCEPTION` — a handler raised an exception
+- `SERVER_REJECT` — the server rejected a sent message
+- `TRANSPORT_WRITE` — failed to write to WebSocket
+
 ### Problem Reports
 
 When a remote handler raises, `request` raises `ProblemReportError`:
@@ -254,12 +297,12 @@ Example: `https://layr8.io/protocols/echo/1.0/request` → protocol `https://lay
 
 ```python
 import asyncio
-from layr8 import Client, Config, Message
+from layr8 import Client, Config, Message, log_errors
 
 ECHO_REQUEST = "https://layr8.io/protocols/echo/1.0/request"
 ECHO_RESPONSE = "https://layr8.io/protocols/echo/1.0/response"
 
-client = Client(Config())
+client = Client(Config(), log_errors())
 
 @client.handle(ECHO_REQUEST)
 async def echo(msg: Message) -> Message:
@@ -281,11 +324,11 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from layr8 import Client, Config, Message, ProblemReportError
+from layr8 import Client, Config, Message, ProblemReportError, log_errors
 
 ECHO_REQUEST = "https://layr8.io/protocols/echo/1.0/request"
 
-client = Client(Config())
+client = Client(Config(), log_errors())
 
 # Must register the protocol even if not handling inbound
 @client.handle(ECHO_REQUEST)

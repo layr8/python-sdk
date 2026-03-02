@@ -6,11 +6,20 @@ import asyncio
 import json
 import socket
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import websockets
 import websockets.asyncio.client
+
+
+@dataclass
+class ServerReply:
+    """Parsed reply from the Phoenix server for a sent message."""
+
+    status: str = ""
+    reason: str = ""
 
 
 def _is_localhost(host: str) -> bool:
@@ -71,6 +80,7 @@ class PhoenixChannel:
         self._read_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._join_future: asyncio.Future[Any] | None = None
+        self._pending_refs: dict[str, asyncio.Future[ServerReply]] = {}
 
     async def connect(self, protocols: list[str]) -> None:
         """Establish WebSocket connection and join the Phoenix channel."""
@@ -144,14 +154,31 @@ class PhoenixChannel:
         if isinstance(response, dict) and response.get("did"):
             self._assigned_did = response["did"]
 
-    async def send(self, event: str, payload: Any) -> None:
-        """Send a Phoenix Channel event."""
+    async def send(self, event: str, payload: Any) -> ServerReply:
+        """Send a Phoenix Channel event and wait for server reply."""
+        ref = self._next_ref()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[ServerReply] = loop.create_future()
+        self._pending_refs[ref] = future
+
+        try:
+            await self._write_msg(None, ref, self._topic, event, payload)
+            return await asyncio.wait_for(future, timeout=15)
+        except asyncio.TimeoutError:
+            self._pending_refs.pop(ref, None)
+            raise
+        except Exception:
+            self._pending_refs.pop(ref, None)
+            raise
+
+    async def send_fire_and_forget(self, event: str, payload: Any) -> None:
+        """Send a Phoenix Channel event without waiting for server reply."""
         ref = self._next_ref()
         await self._write_msg(None, ref, self._topic, event, payload)
 
     async def send_ack(self, ids: list[str]) -> None:
         """Acknowledge message IDs to the cloud-node."""
-        await self.send("ack", {"ids": ids})
+        await self.send_fire_and_forget("ack", {"ids": ids})
 
     @property
     def assigned_did(self) -> str:
@@ -169,6 +196,12 @@ class PhoenixChannel:
                 await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
+
+        # Cancel all pending ref futures
+        for ref, future in list(self._pending_refs.items()):
+            if not future.done():
+                future.cancel()
+        self._pending_refs.clear()
 
         if self._ws:
             try:
@@ -218,8 +251,23 @@ class PhoenixChannel:
     ) -> None:
         """Route inbound Phoenix messages to the appropriate handler."""
         if event == "phx_reply":
+            # Join reply
             if self._join_future and not self._join_future.done() and ref == self._join_ref:
                 self._join_future.set_result(payload)
+                return
+
+            # Message send reply (ref tracking)
+            if ref and ref in self._pending_refs:
+                future = self._pending_refs.pop(ref)
+                if not future.done():
+                    status = ""
+                    reason = ""
+                    if isinstance(payload, dict):
+                        status = payload.get("status", "")
+                        response = payload.get("response", {})
+                        if isinstance(response, dict):
+                            reason = response.get("reason", "")
+                    future.set_result(ServerReply(status=status, reason=reason))
         elif event == "message":
             self._on_message(payload)
         elif event in ("phx_error", "phx_close"):

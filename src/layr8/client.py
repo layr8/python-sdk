@@ -11,8 +11,10 @@ from .config import Config, resolve_config
 from .errors import (
     AlreadyConnectedError,
     ClientClosedError,
+    ErrorKind,
     NotConnectedError,
     ProblemReportError,
+    SDKError,
 )
 from .handler import HandlerEntry, HandlerFn, HandlerRegistry
 from .message import Message, generate_id, marshal_didcomm, parse_didcomm
@@ -24,14 +26,28 @@ class Client:
 
     Lifecycle::
 
-        Client(Config) → handle (register handlers) → connect → ... → close
+        Client(Config, on_error) → handle (register handlers) → connect → ... → close
 
     Or using the async context manager::
 
-        Client(Config) → handle → async with client: ...
+        Client(Config, on_error) → handle → async with client: ...
+
+    The *on_error* callback is **required**.  It receives an :class:`SDKError`
+    for every SDK-level error (parse failures, missing handlers, handler
+    exceptions, server rejects, transport write errors).  Use
+    :func:`log_errors` for a convenient default::
+
+        from layr8 import Client, Config, log_errors
+        client = Client(Config(...), on_error=log_errors())
     """
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, on_error: Callable[[SDKError], None]) -> None:
+        if not callable(on_error):
+            raise TypeError(
+                "on_error is required: pass log_errors() or a custom Callable[[SDKError], None]"
+            )
+        self._on_error = on_error
+
         self._cfg = resolve_config(config)
         self._registry = HandlerRegistry()
         self._channel: PhoenixChannel | None = None
@@ -145,13 +161,22 @@ class Client:
         """Register a callback for reconnection."""
         self._reconnect_fn = fn
 
-    async def send(self, msg: Message) -> None:
-        """Send a fire-and-forget message."""
+    async def send(self, msg: Message, *, fire_and_forget: bool = False) -> None:
+        """
+        Send a message.
+
+        By default, waits for the server to acknowledge the message.
+        Pass ``fire_and_forget=True`` to skip server acknowledgment.
+        """
         if not self._connected or not self._channel:
             raise NotConnectedError()
 
         self._fill_message(msg)
-        await self._send_message(msg)
+
+        if fire_and_forget:
+            await self._send_message_fire_and_forget(msg)
+        else:
+            await self._send_message_acked(msg)
 
     async def request(
         self,
@@ -180,7 +205,7 @@ class Client:
         self._pending[msg.thread_id] = future
 
         try:
-            await self._send_message(msg)
+            await self._send_message_acked(msg)
             resp = await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(msg.thread_id, None)
@@ -203,8 +228,13 @@ class Client:
         """Called by the channel for each inbound 'message' event."""
         try:
             msg = parse_didcomm(payload)
-        except Exception:
-            return  # silently drop unparseable messages
+        except Exception as exc:
+            self._on_error(SDKError(
+                kind=ErrorKind.PARSE_FAILURE,
+                cause=exc,
+                raw=payload,
+            ))
+            return
 
         # Check if this is a response to a pending Request (by thread ID)
         if msg.thread_id and msg.thread_id in self._pending:
@@ -216,6 +246,12 @@ class Client:
         # Route to registered handler
         entry = self._registry.lookup(msg.type)
         if not entry:
+            self._on_error(SDKError(
+                kind=ErrorKind.NO_HANDLER,
+                message_id=msg.id,
+                type=msg.type,
+                from_did=msg.from_,
+            ))
             return
 
         # Auto-ack before handler (unless manual ack)
@@ -246,6 +282,13 @@ class Client:
                     resp.id = generate_id()
                 await self._send_message(resp)
         except Exception as exc:
+            self._on_error(SDKError(
+                kind=ErrorKind.HANDLER_EXCEPTION,
+                message_id=msg.id,
+                type=msg.type,
+                from_did=msg.from_,
+                cause=exc,
+            ))
             await self._send_problem_report(msg, exc)
 
     async def _send_problem_report(self, original: Message, err: Exception) -> None:
@@ -269,11 +312,27 @@ class Client:
             msg.from_ = self._agent_did
 
     async def _send_message(self, msg: Message) -> None:
-        """Serialize and send a DIDComm message via the channel."""
+        """Serialize and send a DIDComm message via the channel (fire-and-forget)."""
         if not self._channel:
             raise NotConnectedError()
         data = marshal_didcomm(msg)
-        await self._channel.send("message", data)
+        await self._channel.send_fire_and_forget("message", data)
+
+    async def _send_message_acked(self, msg: Message) -> None:
+        """Send a message and wait for server ack."""
+        if not self._channel:
+            raise NotConnectedError()
+        data = marshal_didcomm(msg)
+        reply = await self._channel.send("message", data)
+        if reply.status == "error":
+            raise RuntimeError(reply.reason or f"server rejected message: {reply.status}")
+
+    async def _send_message_fire_and_forget(self, msg: Message) -> None:
+        """Send a message without waiting for server ack."""
+        if not self._channel:
+            raise NotConnectedError()
+        data = marshal_didcomm(msg)
+        await self._channel.send_fire_and_forget("message", data)
 
     def _on_disconnect(self, err: Exception) -> None:
         """Internal disconnect handler that forwards to user callback."""

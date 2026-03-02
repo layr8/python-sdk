@@ -14,13 +14,13 @@ Requires Python 3.11 or later.
 
 ```python
 import asyncio
-from layr8 import Client, Config, Message
+from layr8 import Client, Config, Message, log_errors
 
 client = Client(Config(
     node_url="ws://localhost:4000/plugin_socket/websocket",
     api_key="your-api-key",
     agent_did="did:web:myorg:my-agent",
-))
+), log_errors())
 
 @client.handle("https://layr8.io/protocols/echo/1.0/request")
 async def echo(msg: Message) -> Message:
@@ -45,7 +45,7 @@ asyncio.run(main())
 The `Client` is the main entry point. It manages the WebSocket connection to a cloud-node, routes inbound messages to handlers, and provides methods for sending outbound messages.
 
 ```python
-client = Client(Config(...))
+client = Client(Config(...), log_errors())
 
 # Register handlers before connecting
 @client.handle(message_type)
@@ -133,9 +133,9 @@ The SDK automatically derives protocol base URIs from your handler message types
 
 ## Sending Messages
 
-### Send (Fire-and-Forget)
+### Send
 
-Send a one-way message with no response expected:
+Send a one-way message. By default, `send()` waits for the server to acknowledge receipt of the message. If the server rejects the message, a `RuntimeError` is raised.
 
 ```python
 await client.send(Message(
@@ -143,6 +143,19 @@ await client.send(Message(
     to=["did:web:other-org:their-agent"],
     body={"content": "hello!"},
 ))
+```
+
+To skip waiting for the server acknowledgment (fire-and-forget), pass `fire_and_forget=True`:
+
+```python
+await client.send(
+    Message(
+        type="https://didcomm.org/basicmessage/2.0/message",
+        to=["did:web:other-org:their-agent"],
+        body={"content": "hello!"},
+    ),
+    fire_and_forget=True,
+)
 ```
 
 ### Request (Request/Response)
@@ -190,11 +203,11 @@ client = Client(Config(
     node_url="ws://localhost:4000/plugin_socket/websocket",
     api_key="my-api-key",
     agent_did="did:web:myorg:my-agent",
-))
+), log_errors())
 
 # Environment-only configuration
 # Set LAYR8_NODE_URL, LAYR8_API_KEY, LAYR8_AGENT_DID
-client = Client(Config())
+client = Client(Config(), log_errors())
 ```
 
 ## Handler Options
@@ -221,7 +234,7 @@ If no `agent_did` is configured, the cloud-node assigns an ephemeral DID on conn
 client = Client(Config(
     node_url="ws://localhost:4000/plugin_socket/websocket",
     api_key="my-key",
-))
+), log_errors())
 await client.connect()
 
 print(client.did)  # "did:web:myorg:abc123" (assigned by node)
@@ -264,6 +277,45 @@ async def handler(msg: Message) -> None:
 | `sender_credentials` | `list[Credential]` | Verifiable credentials presented by the sender |
 
 ## Error Handling
+
+### Error Handler (on_error)
+
+The `Client` constructor requires an `on_error` callback as its second argument. This callback receives an `SDKError` for every SDK-level error that cannot be surfaced as an exception (parse failures, missing handlers, handler exceptions, server rejects, transport write errors).
+
+```python
+from layr8 import Client, Config, SDKError, ErrorKind, log_errors
+
+# Use the built-in log_errors() helper for convenient logging
+client = Client(Config(...), log_errors())
+
+# Or provide a custom error handler
+def my_error_handler(err: SDKError) -> None:
+    print(f"SDK error [{err.kind.value}]: {err.cause}")
+
+client = Client(Config(...), my_error_handler)
+```
+
+The `SDKError` dataclass contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `ErrorKind` | Category of the error |
+| `message_id` | `str` | ID of the message that caused the error (if available) |
+| `type` | `str` | DIDComm message type (if available) |
+| `from_did` | `str` | Sender DID (if available) |
+| `cause` | `Exception \| None` | The underlying exception |
+| `raw` | `Any` | Raw payload for parse failures |
+| `timestamp` | `datetime` | When the error occurred (UTC) |
+
+`ErrorKind` values:
+
+| Kind | Description |
+|---|---|
+| `PARSE_FAILURE` | Inbound message could not be parsed as DIDComm |
+| `NO_HANDLER` | No handler registered for the message type |
+| `HANDLER_EXCEPTION` | A handler raised an exception |
+| `SERVER_REJECT` | The server rejected a sent message |
+| `TRANSPORT_WRITE` | Failed to write to the WebSocket transport |
 
 ### Problem Reports
 
