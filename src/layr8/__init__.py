@@ -5,12 +5,14 @@ from .config import Config
 from .errors import (
     AlreadyConnectedError,
     ClientClosedError,
+    ErrorHandler,
     ErrorKind,
     Layr8ConnectionError,
     Layr8Error,
     NotConnectedError,
     ProblemReportError,
     SDKError,
+    ServerRejectError,
     log_errors,
 )
 from .message import Credential, Message, MessageContext
@@ -26,8 +28,10 @@ __all__ = [
     "AlreadyConnectedError",
     "ClientClosedError",
     "ProblemReportError",
+    "ServerRejectError",
     "Layr8ConnectionError",
     "ErrorKind",
     "SDKError",
+    "ErrorHandler",
     "log_errors",
 ]

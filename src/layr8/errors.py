@@ -48,6 +48,14 @@ class ProblemReportError(Layr8Error):
         self.comment = comment
 
 
+class ServerRejectError(Layr8Error):
+    """Raised when the server rejects a sent message."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"server rejected message: {reason}")
+        self.reason = reason
+
+
 class Layr8ConnectionError(Layr8Error):
     """Represents a failure to connect to the cloud-node."""
 

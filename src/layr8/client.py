@@ -11,10 +11,12 @@ from .config import Config, resolve_config
 from .errors import (
     AlreadyConnectedError,
     ClientClosedError,
+    ErrorHandler,
     ErrorKind,
     NotConnectedError,
     ProblemReportError,
     SDKError,
+    ServerRejectError,
 )
 from .handler import HandlerEntry, HandlerFn, HandlerRegistry
 from .message import Message, generate_id, marshal_didcomm, parse_didcomm
@@ -41,7 +43,7 @@ class Client:
         client = Client(Config(...), on_error=log_errors())
     """
 
-    def __init__(self, config: Config, on_error: Callable[[SDKError], None]) -> None:
+    def __init__(self, config: Config, on_error: ErrorHandler) -> None:
         if not callable(on_error):
             raise TypeError(
                 "on_error is required: pass log_errors() or a custom Callable[[SDKError], None]"
@@ -256,11 +258,16 @@ class Client:
 
         # Auto-ack before handler (unless manual ack)
         if not entry.manual_ack:
-            asyncio.ensure_future(self._channel.send_ack([msg.id]))  # type: ignore[union-attr]
+            task = asyncio.ensure_future(self._channel.send_ack([msg.id]))  # type: ignore[union-attr]
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
         else:
-            msg._ack_fn = lambda mid: asyncio.ensure_future(
-                self._channel.send_ack([mid])  # type: ignore[union-attr]
-            )
+            def _manual_ack(mid: str) -> asyncio.Task[None]:
+                t = asyncio.ensure_future(
+                    self._channel.send_ack([mid])  # type: ignore[union-attr]
+                )
+                t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+                return t
+            msg._ack_fn = _manual_ack
 
         # Run handler asynchronously
         asyncio.ensure_future(self._run_handler(entry, msg))
@@ -269,18 +276,6 @@ class Client:
         """Execute a handler and send back the response or problem report."""
         try:
             resp = await entry.fn(msg)
-
-            if resp is not None:
-                # Auto-fill response fields
-                if not resp.from_:
-                    resp.from_ = self._agent_did
-                if not resp.to and msg.from_:
-                    resp.to = [msg.from_]
-                if not resp.thread_id:
-                    resp.thread_id = msg.thread_id or msg.id
-                if not resp.id:
-                    resp.id = generate_id()
-                await self._send_message(resp)
         except Exception as exc:
             self._on_error(SDKError(
                 kind=ErrorKind.HANDLER_EXCEPTION,
@@ -289,7 +284,32 @@ class Client:
                 from_did=msg.from_,
                 cause=exc,
             ))
-            await self._send_problem_report(msg, exc)
+            try:
+                await self._send_problem_report(msg, exc)
+            except Exception:
+                pass
+            return
+
+        if resp is not None:
+            # Auto-fill response fields
+            if not resp.from_:
+                resp.from_ = self._agent_did
+            if not resp.to and msg.from_:
+                resp.to = [msg.from_]
+            if not resp.thread_id:
+                resp.thread_id = msg.thread_id or msg.id
+            if not resp.id:
+                resp.id = generate_id()
+            try:
+                await self._send_message(resp)
+            except Exception as exc:
+                self._on_error(SDKError(
+                    kind=ErrorKind.TRANSPORT_WRITE,
+                    message_id=msg.id,
+                    type=msg.type,
+                    from_did=msg.from_,
+                    cause=exc,
+                ))
 
     async def _send_problem_report(self, original: Message, err: Exception) -> None:
         """Send a DIDComm problem report for a handler error."""
@@ -325,7 +345,7 @@ class Client:
         data = marshal_didcomm(msg)
         reply = await self._channel.send("message", data)
         if reply.status == "error":
-            raise RuntimeError(reply.reason or f"server rejected message: {reply.status}")
+            raise ServerRejectError(reply.reason or reply.status)
 
     async def _send_message_fire_and_forget(self, msg: Message) -> None:
         """Send a message without waiting for server ack."""

@@ -10,7 +10,7 @@ import pytest
 import websockets
 import websockets.asyncio.server
 
-from layr8 import Client, Config, Message, ProblemReportError, ErrorKind, SDKError, log_errors
+from layr8 import Client, Config, Message, ProblemReportError, ServerRejectError, ErrorKind, SDKError, log_errors
 
 
 def _discard_errors(err: SDKError) -> None:
@@ -640,7 +640,7 @@ class TestClient:
 
         await client.connect()
 
-        with pytest.raises(RuntimeError, match="not_authorized"):
+        with pytest.raises(ServerRejectError, match="not_authorized"):
             await client.send(Message(type="https://didcomm.org/basicmessage/2.0/message", to=["did:web:bob"], body={}))
 
         await client.close()
