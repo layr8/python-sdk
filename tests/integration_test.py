@@ -217,7 +217,9 @@ async def main() -> None:
 
         cred = Credential(
             context=["https://www.w3.org/ns/credentials/v2"],
+            id=f"urn:uuid:test-cred-{test_id}",
             type=["VerifiableCredential"],
+            issuer=alice_did,
             credential_subject={"id": bob_did, "name": "Bob Test User"},
         )
 
