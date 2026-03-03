@@ -302,7 +302,7 @@ async def main() -> None:
             )
         else:
             try:
-                signed_pres = await alice.sign_presentation([signed_cred])
+                signed_pres = await alice.sign_presentation([signed_cred], nonce="test-nonce")
                 if not signed_pres:
                     fail_("sign presentation", "sign_presentation returned empty string")
                 else:
