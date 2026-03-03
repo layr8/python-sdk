@@ -361,6 +361,87 @@ except Layr8ConnectionError as e:
 | `ProblemReportError` | Remote handler returned an error (`.code`, `.comment`) |
 | `Layr8ConnectionError` | Failed to connect to cloud-node (`.url`, `.reason`) |
 
+## W3C Verifiable Credentials
+
+The SDK provides methods for signing, verifying, storing, listing, and retrieving [W3C Verifiable Credentials](https://www.w3.org/TR/vc-data-model-2.0/). These operations use the cloud-node's REST API and the DID keys in the node's wallet.
+
+### Sign a Credential
+
+```python
+from layr8.credentials import Credential
+
+cred = Credential(
+    context=["https://www.w3.org/ns/credentials/v2"],
+    id="urn:uuid:my-credential",
+    type=["VerifiableCredential"],
+    issuer=client.did,
+    credential_subject={"id": "did:web:example:holder", "name": "Alice"},
+)
+
+signed_jwt = await client.sign_credential(cred)
+```
+
+Keyword arguments: `issuer_did`, `format`.
+
+### Verify a Credential
+
+```python
+verified = await client.verify_credential(signed_jwt)
+print(verified.credential)  # decoded credential claims
+print(verified.headers)      # JWT headers (alg, kid, etc.)
+```
+
+Keyword arguments: `verifier_did`.
+
+> **Note:** The verifier DID must have keys in the local node's wallet. Cross-node verification is not currently supported.
+
+### Store, List, Get
+
+```python
+# Store a signed credential
+stored = await client.store_credential(signed_jwt)
+print(stored.id)  # storage ID
+
+# List all stored credentials
+creds = await client.list_credentials()
+
+# Retrieve by ID
+fetched = await client.get_credential(stored.id)
+print(fetched.credential_jwt)  # the original signed JWT
+```
+
+Store keyword arguments: `holder_did`, `issuer_did`, `valid_until`.
+List keyword arguments: `holder_did`.
+
+### Output Formats
+
+The `format` argument accepts: `"compact_jwt"` (default), `"json"`, `"jwt"`, `"enveloped"`.
+
+## W3C Verifiable Presentations
+
+Presentations wrap one or more signed credentials into a holder-signed envelope.
+
+### Sign a Presentation
+
+```python
+signed_pres = await client.sign_presentation(
+    [signed_jwt],
+    nonce="challenge-from-verifier",
+)
+```
+
+Keyword arguments: `holder_did`, `format`, `nonce`.
+
+### Verify a Presentation
+
+```python
+verified = await client.verify_presentation(signed_pres)
+print(verified.presentation)  # decoded presentation claims
+print(verified.headers)        # JWT headers
+```
+
+Keyword arguments: `verifier_did`.
+
 ## Examples
 
 The [examples/](examples/) directory contains complete, runnable agents:
