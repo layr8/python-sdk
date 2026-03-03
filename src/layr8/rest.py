@@ -3,10 +3,44 @@
 from __future__ import annotations
 
 import json
+import socket
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
+from aiohttp.resolver import DefaultResolver
+
+
+def _is_localhost(hostname: str) -> bool:
+    """Check whether a hostname is localhost or a subdomain of it (RFC 6761)."""
+    return hostname == "localhost" or hostname.endswith(".localhost")
+
+
+class _LocalhostResolver(DefaultResolver):
+    """Resolver that maps ``*.localhost`` to ``127.0.0.1``.
+
+    This matches the Go SDK's custom dialer behavior, ensuring REST API
+    calls work with local-dev-stack hostnames like ``alice-test.localhost``.
+    """
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: int = socket.AF_INET,
+    ) -> list[dict[str, Any]]:
+        if _is_localhost(host):
+            return [
+                {
+                    "hostname": host,
+                    "host": "127.0.0.1",
+                    "port": port,
+                    "family": socket.AF_INET,
+                    "proto": 0,
+                    "flags": socket.AI_NUMERICHOST,
+                },
+            ]
+        return await super().resolve(host, port, family)
 
 
 def rest_url_from_websocket(ws_url: str) -> str:
@@ -49,7 +83,9 @@ class RestClient:
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(resolver=_LocalhostResolver())
             self._session = aiohttp.ClientSession(
+                connector=connector,
                 timeout=aiohttp.ClientTimeout(total=30),
             )
         return self._session
