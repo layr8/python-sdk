@@ -13,6 +13,8 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import websockets
 import websockets.asyncio.client
 
+from .backoff import Backoff
+
 
 @dataclass
 class ServerReply:
@@ -77,13 +79,23 @@ class PhoenixChannel:
         self._join_ref = ""
         self._assigned_did = ""
         self._closed = False
+        self._reconnecting: bool = False
+        self._protocols: list[str] = []
         self._read_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
         self._join_future: asyncio.Future[Any] | None = None
         self._pending_refs: dict[str, asyncio.Future[ServerReply]] = {}
 
     async def connect(self, protocols: list[str]) -> None:
         """Establish WebSocket connection and join the Phoenix channel."""
+        self._protocols = protocols
+        await self._dial()
+
+    async def _dial(self) -> None:
+        """Open the WebSocket and join the channel (used by connect and reconnect)."""
+        self._ref_counter = 0
+
         parsed = urlparse(self._ws_url)
         qs = parse_qs(parsed.query)
         qs["api_key"] = [self._api_key]
@@ -109,7 +121,7 @@ class PhoenixChannel:
         self._read_task = asyncio.create_task(self._read_loop())
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
-        await self._join(protocols)
+        await self._join(self._protocols)
 
     async def _join(self, protocols: list[str]) -> None:
         """Send phx_join and wait for the reply."""
@@ -189,6 +201,15 @@ class PhoenixChannel:
         if self._closed:
             return
         self._closed = True
+        self._reconnecting = False
+
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
+            self._reconnect_task = None
 
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
@@ -235,11 +256,23 @@ class PhoenixChannel:
                 except (json.JSONDecodeError, ValueError):
                     continue
         except websockets.exceptions.ConnectionClosed:
-            if not self._closed and self._on_disconnect:
-                self._on_disconnect(Exception("WebSocket closed"))
+            pass
         except Exception as exc:
-            if not self._closed and self._on_disconnect:
-                self._on_disconnect(exc)
+            if not self._closed:
+                if self._on_disconnect:
+                    self._on_disconnect(exc)
+                self._reject_pending_refs()
+                if not self._reconnecting:
+                    self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+                return
+
+        # Iterator ended (clean close) or ConnectionClosed — trigger reconnect
+        if not self._closed:
+            if self._on_disconnect:
+                self._on_disconnect(Exception("WebSocket closed"))
+            self._reject_pending_refs()
+            if not self._reconnecting:
+                self._reconnect_task = asyncio.create_task(self._reconnect_loop())
 
     def _handle_inbound(
         self,
@@ -300,12 +333,52 @@ class PhoenixChannel:
         event: str,
         payload: Any,
     ) -> None:
-        if not self._ws:
+        if not self._ws or self._reconnecting:
             from .errors import NotConnectedError
 
             raise NotConnectedError()
         data = json.dumps([join_ref, ref, topic, event, payload])
         await self._ws.send(data)
+
+    def _reject_pending_refs(self) -> None:
+        """Cancel all pending ref futures."""
+        for ref, future in list(self._pending_refs.items()):
+            if not future.done():
+                future.cancel()
+        self._pending_refs.clear()
+
+    async def _reconnect_loop(self) -> None:
+        """Attempt to reconnect with exponential backoff."""
+        if self._reconnecting:
+            return
+        self._reconnecting = True
+
+        # Clean up old connection
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+
+        bo = Backoff(1.0, 30.0)
+
+        while not self._closed:
+            delay = bo.next()
+            await asyncio.sleep(delay)
+            if self._closed:
+                return
+            try:
+                self._reconnecting = False
+                await self._dial()
+                if self._on_reconnect:
+                    self._on_reconnect()
+                return
+            except Exception:
+                self._reconnecting = True
+                continue
 
 
 def _make_connection_error(

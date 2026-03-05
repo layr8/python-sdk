@@ -240,9 +240,15 @@ await client.connect()
 print(client.did)  # "did:web:myorg:abc123" (assigned by node)
 ```
 
-### Disconnect and Reconnect Callbacks
+### Connection Resilience
 
-Monitor connection state with callbacks:
+The SDK automatically reconnects when the WebSocket connection drops (e.g., node restart, network interruption). Reconnection uses exponential backoff starting at 1 second, capped at 30 seconds.
+
+During reconnection:
+- `send()`, `request()`, and other operations raise `NotConnectedError` immediately — the SDK does not queue messages
+- The `on_disconnect` callback fires when the connection drops
+- The `on_reconnect` callback fires when the connection is restored
+- `close()` stops the reconnect loop
 
 ```python
 @client.on_disconnect

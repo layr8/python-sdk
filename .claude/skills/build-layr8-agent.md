@@ -253,7 +253,13 @@ except Layr8ConnectionError as e:
 
 Note: `request()` raises `asyncio.TimeoutError` on timeout (uses `asyncio.wait_for`).
 
-## Connection Callbacks
+## Connection Resilience
+
+The SDK automatically reconnects when the WebSocket connection drops (node restart, network interruption). Reconnection uses exponential backoff (1s → 2s → 4s → ... → 30s max).
+
+During reconnection:
+- `send()`, `request()`, and other operations raise `NotConnectedError` immediately — no message queuing
+- `close()` stops the reconnect loop
 
 ```python
 @client.on_disconnect
@@ -265,7 +271,7 @@ def handle_reconnect():
     print("reconnected")
 ```
 
-Note: `on_disconnect` fires only on unexpected drops, not on `close()`.
+`on_disconnect` fires only on unexpected drops, not on `close()`.
 
 ## DID and Protocol Conventions
 
