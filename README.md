@@ -14,13 +14,13 @@ Requires Python 3.11 or later.
 
 ```python
 import asyncio
-from layr8 import Client, Config, Message
+from layr8 import Client, Config, Message, log_errors
 
 client = Client(Config(
     node_url="ws://localhost:4000/plugin_socket/websocket",
     api_key="your-api-key",
     agent_did="did:web:myorg:my-agent",
-))
+), log_errors())
 
 @client.handle("https://layr8.io/protocols/echo/1.0/request")
 async def echo(msg: Message) -> Message:
@@ -45,7 +45,7 @@ asyncio.run(main())
 The `Client` is the main entry point. It manages the WebSocket connection to a cloud-node, routes inbound messages to handlers, and provides methods for sending outbound messages.
 
 ```python
-client = Client(Config(...))
+client = Client(Config(...), log_errors())
 
 # Register handlers before connecting
 @client.handle(message_type)
@@ -133,9 +133,9 @@ The SDK automatically derives protocol base URIs from your handler message types
 
 ## Sending Messages
 
-### Send (Fire-and-Forget)
+### Send
 
-Send a one-way message with no response expected:
+Send a one-way message. By default, `send()` waits for the server to acknowledge receipt of the message. If the server rejects the message, a `RuntimeError` is raised.
 
 ```python
 await client.send(Message(
@@ -143,6 +143,19 @@ await client.send(Message(
     to=["did:web:other-org:their-agent"],
     body={"content": "hello!"},
 ))
+```
+
+To skip waiting for the server acknowledgment (fire-and-forget), pass `fire_and_forget=True`:
+
+```python
+await client.send(
+    Message(
+        type="https://didcomm.org/basicmessage/2.0/message",
+        to=["did:web:other-org:their-agent"],
+        body={"content": "hello!"},
+    ),
+    fire_and_forget=True,
+)
 ```
 
 ### Request (Request/Response)
@@ -190,11 +203,11 @@ client = Client(Config(
     node_url="ws://localhost:4000/plugin_socket/websocket",
     api_key="my-api-key",
     agent_did="did:web:myorg:my-agent",
-))
+), log_errors())
 
 # Environment-only configuration
 # Set LAYR8_NODE_URL, LAYR8_API_KEY, LAYR8_AGENT_DID
-client = Client(Config())
+client = Client(Config(), log_errors())
 ```
 
 ## Handler Options
@@ -221,15 +234,21 @@ If no `agent_did` is configured, the cloud-node assigns an ephemeral DID on conn
 client = Client(Config(
     node_url="ws://localhost:4000/plugin_socket/websocket",
     api_key="my-key",
-))
+), log_errors())
 await client.connect()
 
 print(client.did)  # "did:web:myorg:abc123" (assigned by node)
 ```
 
-### Disconnect and Reconnect Callbacks
+### Connection Resilience
 
-Monitor connection state with callbacks:
+The SDK automatically reconnects when the WebSocket connection drops (e.g., node restart, network interruption). Reconnection uses exponential backoff starting at 1 second, capped at 30 seconds.
+
+During reconnection:
+- `send()`, `request()`, and other operations raise `NotConnectedError` immediately — the SDK does not queue messages
+- The `on_disconnect` callback fires when the connection drops
+- The `on_reconnect` callback fires when the connection is restored
+- `close()` stops the reconnect loop
 
 ```python
 @client.on_disconnect
@@ -264,6 +283,45 @@ async def handler(msg: Message) -> None:
 | `sender_credentials` | `list[Credential]` | Verifiable credentials presented by the sender |
 
 ## Error Handling
+
+### Error Handler (on_error)
+
+The `Client` constructor requires an `on_error` callback as its second argument. This callback receives an `SDKError` for every SDK-level error that cannot be surfaced as an exception (parse failures, missing handlers, handler exceptions, server rejects, transport write errors).
+
+```python
+from layr8 import Client, Config, SDKError, ErrorKind, log_errors
+
+# Use the built-in log_errors() helper for convenient logging
+client = Client(Config(...), log_errors())
+
+# Or provide a custom error handler
+def my_error_handler(err: SDKError) -> None:
+    print(f"SDK error [{err.kind.value}]: {err.cause}")
+
+client = Client(Config(...), my_error_handler)
+```
+
+The `SDKError` dataclass contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `ErrorKind` | Category of the error |
+| `message_id` | `str` | ID of the message that caused the error (if available) |
+| `type` | `str` | DIDComm message type (if available) |
+| `from_did` | `str` | Sender DID (if available) |
+| `cause` | `Exception \| None` | The underlying exception |
+| `raw` | `Any` | Raw payload for parse failures |
+| `timestamp` | `datetime` | When the error occurred (UTC) |
+
+`ErrorKind` values:
+
+| Kind | Description |
+|---|---|
+| `PARSE_FAILURE` | Inbound message could not be parsed as DIDComm |
+| `NO_HANDLER` | No handler registered for the message type |
+| `HANDLER_EXCEPTION` | A handler raised an exception |
+| `SERVER_REJECT` | The server rejected a sent message |
+| `TRANSPORT_WRITE` | Failed to write to the WebSocket transport |
 
 ### Problem Reports
 
@@ -308,6 +366,87 @@ except Layr8ConnectionError as e:
 | `ClientClosedError` | `connect()` called on a closed client |
 | `ProblemReportError` | Remote handler returned an error (`.code`, `.comment`) |
 | `Layr8ConnectionError` | Failed to connect to cloud-node (`.url`, `.reason`) |
+
+## W3C Verifiable Credentials
+
+The SDK provides methods for signing, verifying, storing, listing, and retrieving [W3C Verifiable Credentials](https://www.w3.org/TR/vc-data-model-2.0/). These operations use the cloud-node's REST API and the DID keys in the node's wallet.
+
+### Sign a Credential
+
+```python
+from layr8.credentials import Credential
+
+cred = Credential(
+    context=["https://www.w3.org/ns/credentials/v2"],
+    id="urn:uuid:my-credential",
+    type=["VerifiableCredential"],
+    issuer=client.did,
+    credential_subject={"id": "did:web:example:holder", "name": "Alice"},
+)
+
+signed_jwt = await client.sign_credential(cred)
+```
+
+Keyword arguments: `issuer_did`, `format`.
+
+### Verify a Credential
+
+```python
+verified = await client.verify_credential(signed_jwt)
+print(verified.credential)  # decoded credential claims
+print(verified.headers)      # JWT headers (alg, kid, etc.)
+```
+
+Keyword arguments: `verifier_did`.
+
+> **Note:** The verifier DID must have keys in the local node's wallet. Cross-node verification is not currently supported.
+
+### Store, List, Get
+
+```python
+# Store a signed credential
+stored = await client.store_credential(signed_jwt)
+print(stored.id)  # storage ID
+
+# List all stored credentials
+creds = await client.list_credentials()
+
+# Retrieve by ID
+fetched = await client.get_credential(stored.id)
+print(fetched.credential_jwt)  # the original signed JWT
+```
+
+Store keyword arguments: `holder_did`, `issuer_did`, `valid_until`.
+List keyword arguments: `holder_did`.
+
+### Output Formats
+
+The `format` argument accepts: `"compact_jwt"` (default), `"json"`, `"jwt"`, `"enveloped"`.
+
+## W3C Verifiable Presentations
+
+Presentations wrap one or more signed credentials into a holder-signed envelope.
+
+### Sign a Presentation
+
+```python
+signed_pres = await client.sign_presentation(
+    [signed_jwt],
+    nonce="challenge-from-verifier",
+)
+```
+
+Keyword arguments: `holder_did`, `format`, `nonce`.
+
+### Verify a Presentation
+
+```python
+verified = await client.verify_presentation(signed_pres)
+print(verified.presentation)  # decoded presentation claims
+print(verified.headers)        # JWT headers
+```
+
+Keyword arguments: `verifier_did`.
 
 ## Examples
 

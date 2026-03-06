@@ -10,7 +10,12 @@ import pytest
 import websockets
 import websockets.asyncio.server
 
-from layr8 import Client, Config, Message, ProblemReportError
+from layr8 import Client, Config, Message, ProblemReportError, ServerRejectError, ErrorKind, SDKError, log_errors
+
+
+def _discard_errors(err: SDKError) -> None:
+    """Error handler that silently discards all SDK errors."""
+    pass
 
 
 class MockPhoenixServer:
@@ -84,7 +89,7 @@ async def mock_server():
     server = MockPhoenixServer()
     await server.start()
 
-    # Default: auto-reply to phx_join
+    # Default: auto-reply to phx_join AND ack all other messages
     def default_handler(msg: dict[str, Any]) -> None:
         if msg["event"] == "phx_join":
             asyncio.ensure_future(
@@ -94,6 +99,18 @@ async def mock_server():
                     msg["topic"],
                     "phx_reply",
                     {"status": "ok", "response": {"did": "did:web:node:test"}},
+                )
+            )
+            return
+        # Reply "ok" to all other messages (server ack)
+        if msg.get("ref"):
+            asyncio.ensure_future(
+                server.send_to_client(
+                    None,
+                    msg["ref"],
+                    msg["topic"],
+                    "phx_reply",
+                    {"status": "ok", "response": {}},
                 )
             )
 
@@ -112,23 +129,23 @@ class TestClient:
             node_url="ws://localhost:4000/plugin_socket/websocket",
             api_key="test-key",
             agent_did="did:web:test",
-        ))
+        ), _discard_errors)
         assert client is not None
 
     async def test_raises_when_node_url_missing(self) -> None:
         with pytest.raises(Exception, match="node_url is required"):
-            Client(Config(api_key="test-key"))
+            Client(Config(api_key="test-key"), _discard_errors)
 
     async def test_raises_when_api_key_missing(self) -> None:
         with pytest.raises(Exception, match="api_key is required"):
-            Client(Config(node_url="ws://localhost:4000"))
+            Client(Config(node_url="ws://localhost:4000"), _discard_errors)
 
     async def test_connects_and_closes(self, mock_server: MockPhoenixServer) -> None:
         client = Client(Config(
             node_url=ws_url(mock_server),
             api_key="test-key",
             agent_did="did:web:test",
-        ))
+        ), _discard_errors)
         await client.connect()
         await client.close()
 
@@ -137,7 +154,7 @@ class TestClient:
             node_url=ws_url(mock_server),
             api_key="test-key",
             agent_did="",
-        ))
+        ), _discard_errors)
         await client.connect()
         assert client.did == "did:web:node:test"
         await client.close()
@@ -147,7 +164,7 @@ class TestClient:
             node_url="ws://localhost:4000",
             api_key="test-key",
             agent_did="did:web:test",
-        ))
+        ), _discard_errors)
 
         @client.handle("https://layr8.io/protocols/echo/1.0/request")
         async def handler(msg: Message) -> None:
@@ -162,7 +179,7 @@ class TestClient:
             node_url=ws_url(mock_server),
             api_key="test-key",
             agent_did="did:web:test",
-        ))
+        ), _discard_errors)
 
         @client.handle("https://layr8.io/protocols/echo/1.0/request")
         async def handler(msg: Message) -> None:
@@ -183,7 +200,7 @@ class TestClient:
             node_url=ws_url(mock_server),
             api_key="test-key",
             agent_did="did:web:alice",
-        ))
+        ), _discard_errors)
 
         @client.handle("https://layr8.io/protocols/echo/1.0/request")
         async def handler(msg: Message) -> None:
@@ -209,7 +226,7 @@ class TestClient:
             node_url="ws://localhost:4000",
             api_key="test-key",
             agent_did="did:web:test",
-        ))
+        ), _discard_errors)
         with pytest.raises(Exception, match="not connected"):
             await client.send(Message(type="test", to=["did:web:bob"]))
 
@@ -226,6 +243,15 @@ class TestClient:
                 )
             elif msg["event"] == "message":
                 payload = msg["payload"]
+                # First, send server ack for the message send
+                if msg.get("ref"):
+                    asyncio.ensure_future(
+                        mock_server.send_to_client(
+                            None, msg["ref"], msg["topic"],
+                            "phx_reply", {"status": "ok", "response": {}},
+                        )
+                    )
+                # Then send the DIDComm response
                 asyncio.ensure_future(
                     mock_server.send_to_client(
                         None, None, "plugins:did:web:alice", "message",
@@ -241,6 +267,15 @@ class TestClient:
                         },
                     )
                 )
+            else:
+                # Ack any other messages (e.g., ack events)
+                if msg.get("ref"):
+                    asyncio.ensure_future(
+                        mock_server.send_to_client(
+                            None, msg["ref"], msg["topic"],
+                            "phx_reply", {"status": "ok", "response": {}},
+                        )
+                    )
 
         mock_server.on_msg = handler
 
@@ -248,7 +283,7 @@ class TestClient:
             node_url=ws_url(mock_server),
             api_key="test-key",
             agent_did="did:web:alice",
-        ))
+        ), _discard_errors)
 
         @client.handle("https://layr8.io/protocols/echo/1.0/request")
         async def echo(msg: Message) -> None:
@@ -272,11 +307,13 @@ class TestClient:
         await client.close()
 
     async def test_request_timeout(self, mock_server: MockPhoenixServer) -> None:
+        # Server acks the message but does NOT send a DIDComm response,
+        # so the timeout comes from waiting for the DIDComm response.
         client = Client(Config(
             node_url=ws_url(mock_server),
             api_key="test-key",
             agent_did="did:web:alice",
-        ))
+        ), _discard_errors)
 
         @client.handle("https://layr8.io/protocols/echo/1.0/request")
         async def handler(msg: Message) -> None:
@@ -309,6 +346,15 @@ class TestClient:
                 )
             elif msg["event"] == "message":
                 payload = msg["payload"]
+                # First, send server ack for the message send
+                if msg.get("ref"):
+                    asyncio.ensure_future(
+                        mock_server.send_to_client(
+                            None, msg["ref"], msg["topic"],
+                            "phx_reply", {"status": "ok", "response": {}},
+                        )
+                    )
+                # Then send the problem report DIDComm response
                 asyncio.ensure_future(
                     mock_server.send_to_client(
                         None, None, "plugins:did:web:alice", "message",
@@ -326,6 +372,15 @@ class TestClient:
                         },
                     )
                 )
+            else:
+                # Ack any other messages
+                if msg.get("ref"):
+                    asyncio.ensure_future(
+                        mock_server.send_to_client(
+                            None, msg["ref"], msg["topic"],
+                            "phx_reply", {"status": "ok", "response": {}},
+                        )
+                    )
 
         mock_server.on_msg = handler
 
@@ -333,7 +388,7 @@ class TestClient:
             node_url=ws_url(mock_server),
             api_key="test-key",
             agent_did="did:web:alice",
-        ))
+        ), _discard_errors)
 
         @client.handle("https://layr8.io/protocols/echo/1.0/request")
         async def echo(msg: Message) -> None:
@@ -361,7 +416,7 @@ class TestClient:
             node_url=ws_url(mock_server),
             api_key="test-key",
             agent_did="did:web:alice",
-        ))
+        ), _discard_errors)
 
         received_msg: asyncio.Future[Message] = asyncio.get_running_loop().create_future()
 
@@ -415,7 +470,7 @@ class TestClient:
             node_url=ws_url(mock_server),
             api_key="test-key",
             agent_did="did:web:alice",
-        ))
+        ), _discard_errors)
 
         @client.handle("https://layr8.io/protocols/echo/1.0/request")
         async def handler(msg: Message) -> Message:
@@ -472,7 +527,7 @@ class TestClient:
             node_url=ws_url(mock_server),
             api_key="test-key",
             agent_did="did:web:test",
-        ))
+        ), _discard_errors)
 
         @client.handle("https://layr8.io/protocols/echo/1.0/request")
         async def echo(msg: Message) -> None:
@@ -488,7 +543,104 @@ class TestClient:
             node_url=ws_url(mock_server),
             api_key="test-key",
             agent_did="did:web:test",
-        ))
+        ), _discard_errors)
 
         async with client:
             assert client.did  # should be connected
+
+    # --- Poka-yoke error handling tests ---
+
+    async def test_raises_without_on_error(self) -> None:
+        with pytest.raises(TypeError):
+            Client(Config(node_url="ws://localhost", api_key="key"))  # type: ignore[call-arg]
+
+    async def test_on_error_parse_failure(self, mock_server: MockPhoenixServer) -> None:
+        errors: list[SDKError] = []
+        client = Client(Config(node_url=ws_url(mock_server), api_key="test-key", agent_did="did:web:test"), errors.append)
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def handler(msg: Message) -> None:
+            return None
+
+        await client.connect()
+        await mock_server.send_to_client(None, None, "plugin:lobby", "message", "not-a-didcomm-message")
+        await asyncio.sleep(0.2)
+
+        assert len(errors) > 0
+        assert errors[0].kind == ErrorKind.PARSE_FAILURE
+        await client.close()
+
+    async def test_on_error_no_handler(self, mock_server: MockPhoenixServer) -> None:
+        errors: list[SDKError] = []
+        client = Client(Config(node_url=ws_url(mock_server), api_key="test-key", agent_did="did:web:test"), errors.append)
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def handler(msg: Message) -> None:
+            return None
+
+        await client.connect()
+        await mock_server.send_to_client(None, None, "plugin:lobby", "message", {
+            "plaintext": {"id": "msg-1", "type": "https://unknown.org/protocol/1.0/unknown", "from": "did:web:other", "body": {}},
+        })
+        await asyncio.sleep(0.2)
+
+        assert len(errors) == 1
+        assert errors[0].kind == ErrorKind.NO_HANDLER
+        await client.close()
+
+    async def test_on_error_handler_exception(self, mock_server: MockPhoenixServer) -> None:
+        errors: list[SDKError] = []
+        client = Client(Config(node_url=ws_url(mock_server), api_key="test-key", agent_did="did:web:alice"), errors.append)
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def handler(msg: Message) -> Message:
+            raise RuntimeError("boom")
+
+        await client.connect()
+        await mock_server.send_to_client(None, None, "plugin:lobby", "message", {
+            "plaintext": {"id": "req-1", "type": "https://layr8.io/protocols/echo/1.0/request", "from": "did:web:bob", "body": {}},
+        })
+        await asyncio.sleep(0.5)
+
+        assert any(e.kind == ErrorKind.HANDLER_EXCEPTION for e in errors)
+        await client.close()
+
+    async def test_send_fire_and_forget(self, mock_server: MockPhoenixServer) -> None:
+        client = Client(Config(node_url=ws_url(mock_server), api_key="test-key", agent_did="did:web:alice"), _discard_errors)
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def handler(msg: Message) -> None:
+            return None
+
+        await client.connect()
+
+        # fire_and_forget=True should succeed even without server ack
+        await client.send(
+            Message(type="https://didcomm.org/basicmessage/2.0/message", to=["did:web:bob"], body={"content": "hi"}),
+            fire_and_forget=True,
+        )
+
+        await client.close()
+
+    async def test_send_server_reject(self, mock_server: MockPhoenixServer) -> None:
+        # Override to reject messages
+        def handler(msg: dict[str, Any]) -> None:
+            if msg["event"] == "phx_join":
+                asyncio.ensure_future(mock_server.send_to_client(msg["ref"], msg["ref"], msg["topic"], "phx_reply", {"status": "ok", "response": {}}))
+                return
+            if msg.get("ref"):
+                asyncio.ensure_future(mock_server.send_to_client(None, msg["ref"], msg["topic"], "phx_reply", {"status": "error", "response": {"reason": "not_authorized"}}))
+        mock_server.on_msg = handler
+
+        client = Client(Config(node_url=ws_url(mock_server), api_key="test-key", agent_did="did:web:alice"), _discard_errors)
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def echo(msg: Message) -> None:
+            return None
+
+        await client.connect()
+
+        with pytest.raises(ServerRejectError, match="not_authorized"):
+            await client.send(Message(type="https://didcomm.org/basicmessage/2.0/message", to=["did:web:bob"], body={}))
+
+        await client.close()

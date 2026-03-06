@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 
 @dataclass
-class Credential:
+class SenderCredential:
     """A sender credential from the cloud-node."""
 
     id: str = ""
@@ -21,7 +21,7 @@ class MessageContext:
 
     recipient: str = ""
     authorized: bool = False
-    sender_credentials: list[Credential] = field(default_factory=list)
+    sender_credentials: list[SenderCredential] = field(default_factory=list)
 
 
 @dataclass
@@ -103,7 +103,7 @@ def parse_didcomm(data: dict[str, Any]) -> Message:
     ctx = data.get("context")
     if ctx:
         creds = [
-            Credential(
+            SenderCredential(
                 id=c.get("credential_subject", {}).get("id", ""),
                 name=c.get("credential_subject", {}).get("name", ""),
             )
