@@ -17,7 +17,7 @@ import asyncio
 import signal as signal_mod
 import sys
 
-from layr8 import Client, Config, Message
+from layr8 import Client, Config, Message, log_errors
 
 
 async def main() -> None:
@@ -26,7 +26,7 @@ async def main() -> None:
         print("usage: chat <recipient-did> [recipient-did...]", file=sys.stderr)
         sys.exit(1)
 
-    client = Client(Config())
+    client = Client(Config(), log_errors())
 
     @client.handle("https://didcomm.org/basicmessage/2.0/message")
     async def on_message(msg: Message) -> None:

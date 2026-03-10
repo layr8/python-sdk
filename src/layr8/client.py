@@ -4,18 +4,27 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
+from urllib.parse import quote as url_quote
 
 from .channel import PhoenixChannel
 from .config import Config, resolve_config
+from .credentials import Credential, StoredCredential, VerifiedCredential
 from .errors import (
     AlreadyConnectedError,
     ClientClosedError,
+    ErrorHandler,
+    ErrorKind,
     NotConnectedError,
     ProblemReportError,
+    SDKError,
+    ServerRejectError,
 )
 from .handler import HandlerEntry, HandlerFn, HandlerRegistry
 from .message import Message, generate_id, marshal_didcomm, parse_didcomm
+from .presentations import VerifiedPresentation
+from .rest import RestClient, rest_url_from_websocket
 
 
 class Client:
@@ -24,20 +33,38 @@ class Client:
 
     Lifecycle::
 
-        Client(Config) → handle (register handlers) → connect → ... → close
+        Client(Config, on_error) → handle (register handlers) → connect → ... → close
 
     Or using the async context manager::
 
-        Client(Config) → handle → async with client: ...
+        Client(Config, on_error) → handle → async with client: ...
+
+    The *on_error* callback is **required**.  It receives an :class:`SDKError`
+    for every SDK-level error (parse failures, missing handlers, handler
+    exceptions, server rejects, transport write errors).  Use
+    :func:`log_errors` for a convenient default::
+
+        from layr8 import Client, Config, log_errors
+        client = Client(Config(...), on_error=log_errors())
     """
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, on_error: ErrorHandler) -> None:
+        if not callable(on_error):
+            raise TypeError(
+                "on_error is required: pass log_errors() or a custom Callable[[SDKError], None]"
+            )
+        self._on_error = on_error
+
         self._cfg = resolve_config(config)
         self._registry = HandlerRegistry()
         self._channel: PhoenixChannel | None = None
         self._connected = False
         self._closed = False
         self._agent_did = self._cfg.agent_did
+
+        # REST client for credential / presentation APIs
+        rest_url = rest_url_from_websocket(self._cfg.node_url)
+        self._rest = RestClient(rest_url, self._cfg.api_key)
 
         # Correlation map for Request/Response: thread_id → Future
         self._pending: dict[str, asyncio.Future[Message]] = {}
@@ -124,6 +151,9 @@ class Client:
             await self._channel.close()
             self._channel = None
 
+        # Close the REST client session
+        await self._rest.close()
+
         # Cancel all pending requests
         for thread_id, fut in list(self._pending.items()):
             if not fut.done():
@@ -145,13 +175,22 @@ class Client:
         """Register a callback for reconnection."""
         self._reconnect_fn = fn
 
-    async def send(self, msg: Message) -> None:
-        """Send a fire-and-forget message."""
+    async def send(self, msg: Message, *, fire_and_forget: bool = False) -> None:
+        """
+        Send a message.
+
+        By default, waits for the server to acknowledge the message.
+        Pass ``fire_and_forget=True`` to skip server acknowledgment.
+        """
         if not self._connected or not self._channel:
             raise NotConnectedError()
 
         self._fill_message(msg)
-        await self._send_message(msg)
+
+        if fire_and_forget:
+            await self._send_message_fire_and_forget(msg)
+        else:
+            await self._send_message_acked(msg)
 
     async def request(
         self,
@@ -180,7 +219,7 @@ class Client:
         self._pending[msg.thread_id] = future
 
         try:
-            await self._send_message(msg)
+            await self._send_message_acked(msg)
             resp = await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(msg.thread_id, None)
@@ -203,8 +242,13 @@ class Client:
         """Called by the channel for each inbound 'message' event."""
         try:
             msg = parse_didcomm(payload)
-        except Exception:
-            return  # silently drop unparseable messages
+        except Exception as exc:
+            self._on_error(SDKError(
+                kind=ErrorKind.PARSE_FAILURE,
+                cause=exc,
+                raw=payload,
+            ))
+            return
 
         # Check if this is a response to a pending Request (by thread ID)
         if msg.thread_id and msg.thread_id in self._pending:
@@ -216,15 +260,26 @@ class Client:
         # Route to registered handler
         entry = self._registry.lookup(msg.type)
         if not entry:
+            self._on_error(SDKError(
+                kind=ErrorKind.NO_HANDLER,
+                message_id=msg.id,
+                type=msg.type,
+                from_did=msg.from_,
+            ))
             return
 
         # Auto-ack before handler (unless manual ack)
         if not entry.manual_ack:
-            asyncio.ensure_future(self._channel.send_ack([msg.id]))  # type: ignore[union-attr]
+            task = asyncio.ensure_future(self._channel.send_ack([msg.id]))  # type: ignore[union-attr]
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
         else:
-            msg._ack_fn = lambda mid: asyncio.ensure_future(
-                self._channel.send_ack([mid])  # type: ignore[union-attr]
-            )
+            def _manual_ack(mid: str) -> asyncio.Task[None]:
+                t = asyncio.ensure_future(
+                    self._channel.send_ack([mid])  # type: ignore[union-attr]
+                )
+                t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+                return t
+            msg._ack_fn = _manual_ack
 
         # Run handler asynchronously
         asyncio.ensure_future(self._run_handler(entry, msg))
@@ -233,20 +288,40 @@ class Client:
         """Execute a handler and send back the response or problem report."""
         try:
             resp = await entry.fn(msg)
-
-            if resp is not None:
-                # Auto-fill response fields
-                if not resp.from_:
-                    resp.from_ = self._agent_did
-                if not resp.to and msg.from_:
-                    resp.to = [msg.from_]
-                if not resp.thread_id:
-                    resp.thread_id = msg.thread_id or msg.id
-                if not resp.id:
-                    resp.id = generate_id()
-                await self._send_message(resp)
         except Exception as exc:
-            await self._send_problem_report(msg, exc)
+            self._on_error(SDKError(
+                kind=ErrorKind.HANDLER_EXCEPTION,
+                message_id=msg.id,
+                type=msg.type,
+                from_did=msg.from_,
+                cause=exc,
+            ))
+            try:
+                await self._send_problem_report(msg, exc)
+            except Exception:
+                pass
+            return
+
+        if resp is not None:
+            # Auto-fill response fields
+            if not resp.from_:
+                resp.from_ = self._agent_did
+            if not resp.to and msg.from_:
+                resp.to = [msg.from_]
+            if not resp.thread_id:
+                resp.thread_id = msg.thread_id or msg.id
+            if not resp.id:
+                resp.id = generate_id()
+            try:
+                await self._send_message(resp)
+            except Exception as exc:
+                self._on_error(SDKError(
+                    kind=ErrorKind.TRANSPORT_WRITE,
+                    message_id=msg.id,
+                    type=msg.type,
+                    from_did=msg.from_,
+                    cause=exc,
+                ))
 
     async def _send_problem_report(self, original: Message, err: Exception) -> None:
         """Send a DIDComm problem report for a handler error."""
@@ -269,13 +344,229 @@ class Client:
             msg.from_ = self._agent_did
 
     async def _send_message(self, msg: Message) -> None:
-        """Serialize and send a DIDComm message via the channel."""
+        """Serialize and send a DIDComm message via the channel (fire-and-forget)."""
         if not self._channel:
             raise NotConnectedError()
         data = marshal_didcomm(msg)
-        await self._channel.send("message", data)
+        await self._channel.send_fire_and_forget("message", data)
+
+    async def _send_message_acked(self, msg: Message) -> None:
+        """Send a message and wait for server ack."""
+        if not self._channel:
+            raise NotConnectedError()
+        data = marshal_didcomm(msg)
+        reply = await self._channel.send("message", data)
+        if reply.status == "error":
+            raise ServerRejectError(reply.reason or reply.status)
+
+    async def _send_message_fire_and_forget(self, msg: Message) -> None:
+        """Send a message without waiting for server ack."""
+        if not self._channel:
+            raise NotConnectedError()
+        data = marshal_didcomm(msg)
+        await self._channel.send_fire_and_forget("message", data)
 
     def _on_disconnect(self, err: Exception) -> None:
         """Internal disconnect handler that forwards to user callback."""
         if self._disconnect_fn:
             self._disconnect_fn(err)
+
+    # ------------------------------------------------------------------
+    # W3C Verifiable Credential APIs (REST, no WebSocket needed)
+    # ------------------------------------------------------------------
+
+    async def sign_credential(
+        self,
+        credential: Credential,
+        *,
+        issuer_did: str = "",
+        format: str = "compact_jwt",
+    ) -> str:
+        """Sign a W3C Verifiable Credential.
+
+        Uses the issuer DID's assertion key from the local wallet.
+
+        Args:
+            credential: The credential to sign.
+            issuer_did: Override the issuer DID (defaults to ``self.did``).
+            format: Output encoding (``compact_jwt``, ``json``, ``jwt``, ``enveloped``).
+
+        Returns:
+            The signed credential string.
+        """
+        body: dict[str, Any] = {
+            "credential": credential.to_dict(),
+            "issuer_did": issuer_did or self._agent_did,
+            "format": format,
+        }
+        result = await self._rest.post("/api/v1/credentials/sign", body)
+        return result["signed_credential"]  # type: ignore[no-any-return]
+
+    async def verify_credential(
+        self,
+        signed_credential: str,
+        *,
+        verifier_did: str = "",
+    ) -> VerifiedCredential:
+        """Verify a signed credential.
+
+        Args:
+            signed_credential: The signed credential string.
+            verifier_did: Override the verifier DID (defaults to ``self.did``).
+
+        Returns:
+            A :class:`VerifiedCredential` with the decoded credential and headers.
+        """
+        body: dict[str, Any] = {
+            "signed_credential": signed_credential,
+            "verifier_did": verifier_did or self._agent_did,
+        }
+        result = await self._rest.post("/api/v1/credentials/verify", body)
+        return VerifiedCredential(
+            credential=result.get("credential", {}),
+            headers=result.get("headers", {}),
+        )
+
+    async def store_credential(
+        self,
+        credential_jwt: str,
+        *,
+        holder_did: str = "",
+        issuer_did: str = "",
+        valid_until: datetime | None = None,
+    ) -> StoredCredential:
+        """Store a signed credential JWT for a holder.
+
+        Args:
+            credential_jwt: The signed credential JWT.
+            holder_did: Override the holder DID (defaults to ``self.did``).
+            issuer_did: Optional issuer DID metadata.
+            valid_until: Optional expiration timestamp.
+
+        Returns:
+            A :class:`StoredCredential` with the stored credential details.
+        """
+        body: dict[str, Any] = {
+            "holder_did": holder_did or self._agent_did,
+            "credential_jwt": credential_jwt,
+        }
+        if issuer_did:
+            body["issuer_did"] = issuer_did
+        if valid_until is not None:
+            body["valid_until"] = valid_until.isoformat()
+
+        result = await self._rest.post("/api/v1/credentials", body)
+        return StoredCredential(
+            id=result.get("id", ""),
+            holder_did=result.get("holder_did", ""),
+            credential_jwt=result.get("credential_jwt", ""),
+            issuer_did=result.get("issuer_did", ""),
+            valid_until=result.get("valid_until", ""),
+        )
+
+    async def list_credentials(
+        self,
+        *,
+        holder_did: str = "",
+    ) -> list[StoredCredential]:
+        """List all stored credentials for a holder.
+
+        Args:
+            holder_did: Override the holder DID (defaults to ``self.did``).
+
+        Returns:
+            A list of :class:`StoredCredential` objects.
+        """
+        did = holder_did or self._agent_did
+        path = "/api/v1/credentials?holder_did=" + url_quote(did, safe="")
+        result = await self._rest.get(path)
+        return [
+            StoredCredential(
+                id=c.get("id", ""),
+                holder_did=c.get("holder_did", ""),
+                credential_jwt=c.get("credential_jwt", ""),
+                issuer_did=c.get("issuer_did", ""),
+                valid_until=c.get("valid_until", ""),
+            )
+            for c in result.get("credentials", [])
+        ]
+
+    async def get_credential(self, credential_id: str) -> StoredCredential:
+        """Retrieve a stored credential by ID.
+
+        Args:
+            credential_id: The credential ID to look up.
+
+        Returns:
+            A :class:`StoredCredential` with the stored credential details.
+        """
+        path = "/api/v1/credentials/" + url_quote(credential_id, safe="")
+        result = await self._rest.get(path)
+        return StoredCredential(
+            id=result.get("id", ""),
+            holder_did=result.get("holder_did", ""),
+            credential_jwt=result.get("credential_jwt", ""),
+            issuer_did=result.get("issuer_did", ""),
+            valid_until=result.get("valid_until", ""),
+        )
+
+    # ------------------------------------------------------------------
+    # W3C Verifiable Presentation APIs (REST, no WebSocket needed)
+    # ------------------------------------------------------------------
+
+    async def sign_presentation(
+        self,
+        credentials: list[str],
+        *,
+        holder_did: str = "",
+        format: str = "compact_jwt",
+        nonce: str = "",
+    ) -> str:
+        """Sign a W3C Verifiable Presentation wrapping signed credentials.
+
+        Uses the holder's authentication key (not assertion key).
+
+        Args:
+            credentials: List of signed credential JWTs to include.
+            holder_did: Override the holder DID (defaults to ``self.did``).
+            format: Output encoding (``compact_jwt``, ``json``, ``jwt``, ``enveloped``).
+            nonce: Optional nonce / challenge string.
+
+        Returns:
+            The signed presentation string.
+        """
+        body: dict[str, Any] = {
+            "credentials": credentials,
+            "holder_did": holder_did or self._agent_did,
+            "format": format,
+        }
+        if nonce:
+            body["nonce"] = nonce
+
+        result = await self._rest.post("/api/v1/presentations/sign", body)
+        return result["signed_presentation"]  # type: ignore[no-any-return]
+
+    async def verify_presentation(
+        self,
+        signed_presentation: str,
+        *,
+        verifier_did: str = "",
+    ) -> VerifiedPresentation:
+        """Verify a signed presentation.
+
+        Args:
+            signed_presentation: The signed presentation string.
+            verifier_did: Override the verifier DID (defaults to ``self.did``).
+
+        Returns:
+            A :class:`VerifiedPresentation` with the decoded presentation and headers.
+        """
+        body: dict[str, Any] = {
+            "signed_presentation": signed_presentation,
+            "verifier_did": verifier_did or self._agent_did,
+        }
+        result = await self._rest.post("/api/v1/presentations/verify", body)
+        return VerifiedPresentation(
+            presentation=result.get("presentation", {}),
+            headers=result.get("headers", {}),
+        )

@@ -24,7 +24,7 @@ import os
 import signal as signal_mod
 import time
 
-from layr8 import Client, Config, Message
+from layr8 import Client, Config, Message, log_errors
 
 ECHO_PROTOCOL_BASE = "https://layr8.io/protocols/echo/1.0"
 ECHO_REQUEST = f"{ECHO_PROTOCOL_BASE}/request"
@@ -116,7 +116,7 @@ async def ping_loop(
 
 async def run_agent(stop_event: asyncio.Event) -> None:
     """Run a single agent session (reconnects on disconnect)."""
-    client = Client(Config())
+    client = Client(Config(), log_errors())
 
     inner_stop = asyncio.Event()
 

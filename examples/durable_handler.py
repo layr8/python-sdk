@@ -18,7 +18,7 @@ import json
 import logging
 import signal as signal_mod
 
-from layr8 import Client, Config, Message
+from layr8 import Client, Config, Message, log_errors
 
 FILE_PATH = "messages.jsonl"
 
@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 
 
 async def main() -> None:
-    client = Client(Config())
+    client = Client(Config(), log_errors())
 
     @client.handle("https://layr8.io/protocols/order/1.0/created", manual_ack=True)
     async def handle_order(msg: Message) -> None:
