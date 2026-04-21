@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from layr8.message import (
+    Attachment,
+    AttachmentData,
     Message,
     generate_id,
     marshal_didcomm,
@@ -116,3 +118,139 @@ class TestAck:
     def test_noop_without_ack_fn(self) -> None:
         msg = Message(id="msg-1")
         msg.ack()  # should not raise
+
+
+class TestAttachmentMarshal:
+    def test_marshal_with_attachments(self) -> None:
+        """Message with attachments marshals correctly."""
+        msg = Message(
+            id="msg-1",
+            type="test",
+            from_="did:web:alice",
+            to=["did:web:bob"],
+            attachments=[
+                Attachment(
+                    id="att-1",
+                    media_type="application/json",
+                    data=AttachmentData(base64="eyJoZWxsbyI6IndvcmxkIn0="),
+                ),
+            ],
+        )
+        data = marshal_didcomm(msg)
+        assert "attachments" in data
+        assert len(data["attachments"]) == 1
+        att = data["attachments"][0]
+        assert att["id"] == "att-1"
+        assert att["media_type"] == "application/json"
+        assert att["data"]["base64"] == "eyJoZWxsbyI6IndvcmxkIn0="
+
+    def test_marshal_without_attachments(self) -> None:
+        """No attachments field when list is empty."""
+        msg = Message(id="msg-1", type="test", from_="did:web:alice")
+        data = marshal_didcomm(msg)
+        assert "attachments" not in data
+
+    def test_attachment_omits_empty_fields(self) -> None:
+        """Empty/None fields are not in marshaled attachment output."""
+        msg = Message(
+            id="msg-1",
+            type="test",
+            from_="did:web:alice",
+            attachments=[
+                Attachment(
+                    id="att-1",
+                    data=AttachmentData(base64="abc123"),
+                ),
+            ],
+        )
+        data = marshal_didcomm(msg)
+        att = data["attachments"][0]
+        assert "id" in att
+        assert "data" in att
+        # Empty string fields should be omitted
+        assert "description" not in att
+        assert "filename" not in att
+        assert "media_type" not in att
+        assert "format" not in att
+        # None fields should be omitted
+        assert "lastmod_time" not in att
+        assert "byte_count" not in att
+        # Empty fields in data should be omitted
+        assert "json" not in att["data"]
+        assert "jws" not in att["data"]
+        assert "hash" not in att["data"]
+        assert "links" not in att["data"]
+
+
+class TestAttachmentParse:
+    def test_parse_with_attachments(self) -> None:
+        """Inbound message with attachments parses correctly."""
+        data = {
+            "plaintext": {
+                "id": "msg-1",
+                "type": "test",
+                "from": "did:web:bob",
+                "to": ["did:web:alice"],
+                "body": {},
+                "attachments": [
+                    {
+                        "id": "att-1",
+                        "description": "A test file",
+                        "media_type": "text/plain",
+                        "data": {
+                            "base64": "aGVsbG8=",
+                            "hash": "abc123",
+                        },
+                    },
+                ],
+            },
+        }
+        msg = parse_didcomm(data)
+        assert len(msg.attachments) == 1
+        att = msg.attachments[0]
+        assert att.id == "att-1"
+        assert att.description == "A test file"
+        assert att.media_type == "text/plain"
+        assert att.data.base64 == "aGVsbG8="
+        assert att.data.hash == "abc123"
+
+    def test_attachment_roundtrip(self) -> None:
+        """Marshal then parse preserves attachments."""
+        original = Message(
+            id="msg-1",
+            type="test",
+            from_="did:web:alice",
+            to=["did:web:bob"],
+            body={"key": "value"},
+            attachments=[
+                Attachment(
+                    id="att-1",
+                    description="Test attachment",
+                    filename="test.json",
+                    media_type="application/json",
+                    format="json",
+                    lastmod_time=1234567890,
+                    byte_count=42,
+                    data=AttachmentData(
+                        base64="eyJoZWxsbyI6IndvcmxkIn0=",
+                        hash="sha256-abc",
+                        links=["https://example.com/file"],
+                    ),
+                ),
+            ],
+        )
+        wire = marshal_didcomm(original)
+        parsed = parse_didcomm({"plaintext": wire})
+
+        assert len(parsed.attachments) == 1
+        att = parsed.attachments[0]
+        assert att.id == "att-1"
+        assert att.description == "Test attachment"
+        assert att.filename == "test.json"
+        assert att.media_type == "application/json"
+        assert att.format == "json"
+        assert att.lastmod_time == 1234567890
+        assert att.byte_count == 42
+        assert att.data.base64 == "eyJoZWxsbyI6IndvcmxkIn0="
+        assert att.data.hash == "sha256-abc"
+        assert att.data.links == ["https://example.com/file"]
