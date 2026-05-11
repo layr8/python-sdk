@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -86,6 +87,15 @@ class PhoenixChannel:
         self._reconnect_task: asyncio.Task[None] | None = None
         self._join_future: asyncio.Future[Any] | None = None
         self._pending_refs: dict[str, asyncio.Future[ServerReply]] = {}
+        # Monotonic timestamp (time.monotonic()) of the most recently
+        # observed inbound Phoenix frame. Powers the application-layer
+        # watchdog in _heartbeat_loop — closes #5 by detecting "TCP healthy
+        # but Phoenix Channel GenServer hung" within ~75s.
+        #
+        # WS-level liveness (TCP / NAT / LB half-dead) is covered separately
+        # by the `websockets` library's built-in ping/pong mechanism, made
+        # explicit in the connect() call below — closes #4.
+        self._last_frame_at = time.monotonic()
 
     async def connect(self, protocols: list[str]) -> None:
         """Establish WebSocket connection and join the Phoenix channel."""
@@ -108,16 +118,31 @@ class PhoenixChannel:
         sock = _create_localhost_socket(full_url)
 
         try:
+            # Explicit WS-level ping/pong (issue #4 — defense-in-depth):
+            # `websockets` defaults to ping_interval=20, ping_timeout=20
+            # which already protects against TCP / NAT / LB half-dead. We
+            # set them explicitly so a future maintainer can't accidentally
+            # disable the layer (e.g. by passing ping_interval=None in a
+            # test scenario and shipping it). 30 / 20 leaves a 50s detection
+            # window — well under AWS NLB's 350s idle timeout — and matches
+            # the policy enforced in go-sdk.
             self._ws = await websockets.asyncio.client.connect(
                 full_url,
                 sock=sock,
                 open_timeout=10,
+                ping_interval=30,
+                ping_timeout=20,
+                close_timeout=10,
             )
         except Exception as exc:
             if sock:
                 sock.close()
             raise _make_connection_error(self._ws_url, exc) from exc
 
+        # Reset the watchdog clock so the first heartbeat tick after
+        # (re)connect measures silence from "just now", not from before
+        # the disconnect.
+        self._last_frame_at = time.monotonic()
         self._read_task = asyncio.create_task(self._read_loop())
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
@@ -247,6 +272,11 @@ class PhoenixChannel:
             async for raw in self._ws:
                 if self._closed:
                     return
+                # Any inbound frame proves the connection is alive
+                # end-to-end — update the watchdog clock before parsing.
+                # Heartbeat ack, message event, phx_reply, phx_error,
+                # all count.
+                self._last_frame_at = time.monotonic()
                 try:
                     arr = json.loads(raw)
                     if not isinstance(arr, list) or len(arr) != 5:
@@ -307,13 +337,39 @@ class PhoenixChannel:
             if self._on_disconnect:
                 self._on_disconnect(Exception(f"channel {event}"))
 
+    # Maximum time a connection may be silent before the Phoenix-layer
+    # watchdog treats it as hung. 2.5× the heartbeat interval — tolerates
+    # one missed reply, trips on two consecutive misses. Catches the case
+    # where TCP + cowboy pong are healthy but cloud-node's per-tenant
+    # Phoenix Channel GenServer has stopped processing (OOM cascade,
+    # deploy window, etc.) — closes #5.
+    _HEARTBEAT_INTERVAL_S = 30
+    _HEARTBEAT_MAX_SILENT_S = 75
+
     async def _heartbeat_loop(self) -> None:
-        """Send heartbeat every 30 seconds."""
+        """Send heartbeat every 30 seconds; close the WS if no inbound frame
+        has arrived within _HEARTBEAT_MAX_SILENT_S.
+        """
         try:
             while not self._closed:
-                await asyncio.sleep(30)
+                await asyncio.sleep(self._HEARTBEAT_INTERVAL_S)
                 if self._closed or not self._ws:
                     return
+
+                silent = time.monotonic() - self._last_frame_at
+                if silent > self._HEARTBEAT_MAX_SILENT_S:
+                    # Application-layer hang: TCP + cowboy pong are still
+                    # working (we wouldn't be here otherwise), but the
+                    # Phoenix Channel GenServer is no longer responding to
+                    # heartbeats. Close the socket; the read loop's
+                    # ConnectionClosed handler will schedule reconnect.
+                    try:
+                        await self._ws.close()
+                    except Exception:
+                        # ignore — already in a bad state
+                        pass
+                    return
+
                 ref = self._next_ref()
                 await self._write_msg(None, ref, "phoenix", "heartbeat", {})
         except asyncio.CancelledError:
