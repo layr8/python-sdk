@@ -6,37 +6,47 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from .message import Message
+from .sentinel import _Pass
 
-HandlerFn = Callable[[Message], Awaitable[Message | None]]
+HandlerFn = Callable[[Message], Awaitable[Message | None | _Pass]]
 
 
 @dataclass
 class HandlerEntry:
     fn: HandlerFn
-    manual_ack: bool = False
 
 
 class HandlerRegistry:
-    """Thread-safe handler registry mapping message types to handlers."""
+    """Handler registry mapping message types to handlers.
+
+    All registration must complete before connect().
+    """
 
     def __init__(self) -> None:
         self._handlers: dict[str, HandlerEntry] = {}
+        self._catch_all: HandlerEntry | None = None
 
     def register(
         self,
         msg_type: str,
         fn: HandlerFn,
-        *,
-        manual_ack: bool = False,
     ) -> None:
         if msg_type in self._handlers:
             raise ValueError(
                 f'handler already registered for message type "{msg_type}"'
             )
-        self._handlers[msg_type] = HandlerEntry(fn=fn, manual_ack=manual_ack)
+        self._handlers[msg_type] = HandlerEntry(fn=fn)
+
+    def register_catch_all(self, fn: HandlerFn) -> None:
+        if self._catch_all is not None:
+            raise ValueError("catch-all handler already registered")
+        self._catch_all = HandlerEntry(fn=fn)
 
     def lookup(self, msg_type: str) -> HandlerEntry | None:
-        return self._handlers.get(msg_type)
+        entry = self._handlers.get(msg_type)
+        if entry is not None:
+            return entry
+        return self._catch_all
 
     def protocols(self) -> list[str]:
         """
@@ -49,7 +59,10 @@ class HandlerRegistry:
         for msg_type in self._handlers:
             proto = _derive_protocol(msg_type)
             seen.add(proto)
-        return list(seen)
+        result = list(seen)
+        if self._catch_all is not None:
+            result.append("*")
+        return result
 
 
 def _derive_protocol(msg_type: str) -> str:

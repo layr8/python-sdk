@@ -23,6 +23,7 @@ from .errors import (
 )
 from .handler import HandlerEntry, HandlerFn, HandlerRegistry
 from .message import Message, generate_id, marshal_didcomm, parse_didcomm
+from .sentinel import _Pass
 from .presentations import VerifiedPresentation
 from .rest import RestClient, rest_url_from_websocket
 
@@ -82,8 +83,6 @@ class Client:
         self,
         msg_type: str,
         fn: HandlerFn | None = None,
-        *,
-        manual_ack: bool = False,
     ) -> Callable[[HandlerFn], HandlerFn] | None:
         """
         Register a handler for a DIDComm message type.
@@ -104,12 +103,45 @@ class Client:
             raise AlreadyConnectedError()
 
         if fn is not None:
-            self._registry.register(msg_type, fn, manual_ack=manual_ack)
+            self._registry.register(msg_type, fn)
             return None
 
         # Decorator mode
         def decorator(handler: HandlerFn) -> HandlerFn:
-            self._registry.register(msg_type, handler, manual_ack=manual_ack)
+            self._registry.register(msg_type, handler)
+            return handler
+
+        return decorator
+
+    def handle_all(
+        self,
+        fn: HandlerFn | None = None,
+    ) -> Callable[[HandlerFn], HandlerFn] | None:
+        """
+        Register a catch-all handler for any unhandled message type.
+
+        Can be used as a decorator::
+
+            @client.handle_all
+            async def catch_all(msg: Message) -> Message | None:
+                ...
+
+        Or called directly::
+
+            client.handle_all(my_fn)
+
+        Must be called BEFORE ``connect()``.
+        """
+        if self._connected:
+            raise AlreadyConnectedError()
+
+        if fn is not None:
+            self._registry.register_catch_all(fn)
+            return None
+
+        # Decorator mode
+        def decorator(handler: HandlerFn) -> HandlerFn:
+            self._registry.register_catch_all(handler)
             return handler
 
         return decorator
@@ -257,7 +289,28 @@ class Client:
                 future.set_result(msg)
             return
 
-        # Route to registered handler
+        if self._channel and self._channel.reply_protocol:
+            self._dispatch_new_mode(msg)
+        else:
+            self._dispatch_legacy_mode(msg)
+
+    def _dispatch_new_mode(self, msg: Message) -> None:
+        """Dispatch using reply protocol — send dispatch_reply after handler."""
+        entry = self._registry.lookup(msg.type)
+        if not entry:
+            self._on_error(SDKError(
+                kind=ErrorKind.NO_HANDLER,
+                message_id=msg.id,
+                type=msg.type,
+                from_did=msg.from_,
+            ))
+            asyncio.ensure_future(self._send_dispatch_reply(msg.id, "pass"))
+            return
+
+        asyncio.ensure_future(self._run_handler_new_mode(entry, msg))
+
+    def _dispatch_legacy_mode(self, msg: Message) -> None:
+        """Dispatch using legacy ack protocol."""
         entry = self._registry.lookup(msg.type)
         if not entry:
             self._on_error(SDKError(
@@ -268,24 +321,15 @@ class Client:
             ))
             return
 
-        # Auto-ack before handler (unless manual ack)
-        if not entry.manual_ack:
-            task = asyncio.ensure_future(self._channel.send_ack([msg.id]))  # type: ignore[union-attr]
+        # Auto-ack before handler
+        if self._channel:
+            task = asyncio.ensure_future(self._channel.send_ack([msg.id]))
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
-        else:
-            def _manual_ack(mid: str) -> asyncio.Task[None]:
-                t = asyncio.ensure_future(
-                    self._channel.send_ack([mid])  # type: ignore[union-attr]
-                )
-                t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
-                return t
-            msg._ack_fn = _manual_ack
 
-        # Run handler asynchronously
         asyncio.ensure_future(self._run_handler(entry, msg))
 
     async def _run_handler(self, entry: HandlerEntry, msg: Message) -> None:
-        """Execute a handler and send back the response or problem report."""
+        """Execute a handler and send back the response or problem report (legacy mode)."""
         try:
             resp = await entry.fn(msg)
         except Exception as exc:
@@ -302,16 +346,8 @@ class Client:
                 pass
             return
 
-        if resp is not None:
-            # Auto-fill response fields
-            if not resp.from_:
-                resp.from_ = self._agent_did
-            if not resp.to and msg.from_:
-                resp.to = [msg.from_]
-            if not resp.thread_id:
-                resp.thread_id = msg.thread_id or msg.id
-            if not resp.id:
-                resp.id = generate_id()
+        if resp is not None and isinstance(resp, Message):
+            self._fill_response(resp, msg)
             try:
                 await self._send_message(resp)
             except Exception as exc:
@@ -322,6 +358,83 @@ class Client:
                     from_did=msg.from_,
                     cause=exc,
                 ))
+
+    async def _run_handler_new_mode(self, entry: HandlerEntry, msg: Message) -> None:
+        """Execute a handler and send dispatch_reply (new mode)."""
+        try:
+            resp = await entry.fn(msg)
+        except Exception as exc:
+            self._on_error(SDKError(
+                kind=ErrorKind.HANDLER_EXCEPTION,
+                message_id=msg.id,
+                type=msg.type,
+                from_did=msg.from_,
+                cause=exc,
+            ))
+            try:
+                await self._send_problem_report(msg, exc)
+            except Exception:
+                pass
+            await self._send_dispatch_reply(
+                msg.id, "error",
+                code=type(exc).__name__,
+                message=str(exc),
+            )
+            return
+
+        if isinstance(resp, _Pass):
+            await self._send_dispatch_reply(msg.id, "pass")
+            return
+
+        if isinstance(resp, Message):
+            self._fill_response(resp, msg)
+            try:
+                await self._send_message(resp)
+            except Exception as exc:
+                self._on_error(SDKError(
+                    kind=ErrorKind.TRANSPORT_WRITE,
+                    message_id=msg.id,
+                    type=msg.type,
+                    from_did=msg.from_,
+                    cause=exc,
+                ))
+
+        await self._send_dispatch_reply(msg.id, "handled")
+
+    def _fill_response(self, resp: Message, original: Message) -> None:
+        """Auto-fill response fields from the original message."""
+        if not resp.from_:
+            resp.from_ = self._agent_did
+        if not resp.to and original.from_:
+            resp.to = [original.from_]
+        if not resp.thread_id:
+            resp.thread_id = original.thread_id or original.id
+        if not resp.id:
+            resp.id = generate_id()
+
+    async def _send_dispatch_reply(
+        self,
+        message_id: str,
+        status: str,
+        *,
+        code: str = "",
+        message: str = "",
+    ) -> None:
+        """Send a dispatch_reply event to the cloud node."""
+        if not self._channel:
+            return
+        payload: dict[str, Any] = {
+            "message_id": message_id,
+            "status": status,
+        }
+        if code:
+            payload["code"] = code
+        if message:
+            payload["message"] = message
+        try:
+            await self._channel.send_fire_and_forget("dispatch_reply", payload)
+        except Exception:
+            pass
 
     async def _send_problem_report(self, original: Message, err: Exception) -> None:
         """Send a DIDComm problem report for a handler error."""

@@ -6,7 +6,6 @@ from .credentials import Credential, StoredCredential, VerifiedCredential
 from .errors import (
     AlreadyConnectedError,
     ClientClosedError,
-    ErrorHandler,
     ErrorKind,
     Layr8ConnectionError,
     Layr8Error,
@@ -16,15 +15,10 @@ from .errors import (
     ServerRejectError,
     log_errors,
 )
-from .message import (
-    Attachment,
-    AttachmentData,
-    Message,
-    MessageContext,
-    SenderCredential,
-)
+from .message import Attachment, AttachmentData, Credential, Message, MessageContext
 from .presentations import VerifiedPresentation
 from .rest import RESTError
+from .sentinel import PASS
 
 __all__ = [
     "Attachment",
@@ -33,7 +27,6 @@ __all__ = [
     "Config",
     "Message",
     "MessageContext",
-    "SenderCredential",
     "Credential",
     "VerifiedCredential",
     "StoredCredential",
@@ -48,6 +41,6 @@ __all__ = [
     "Layr8ConnectionError",
     "ErrorKind",
     "SDKError",
-    "ErrorHandler",
     "log_errors",
+    "PASS",
 ]
