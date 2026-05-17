@@ -33,10 +33,7 @@ class MockPhoenixServer:
 
     async def _handler(self, ws: websockets.asyncio.server.ServerConnection) -> None:
         self._connections.append(ws)
-        self._did_counter += 1
         conn_id = id(ws)
-        assigned_did = f"did:web:node:agent-{self._did_counter}"
-        self._assigned_dids[conn_id] = assigned_did
 
         try:
             async for raw in ws:
@@ -44,6 +41,14 @@ class MockPhoenixServer:
                 join_ref, ref, topic, event, payload = arr
 
                 if event == "phx_join":
+                    topic_did = topic.removeprefix("plugins:")
+                    if topic_did:
+                        assigned_did = topic_did
+                    else:
+                        self._did_counter += 1
+                        assigned_did = f"did:web:node:agent-{self._did_counter}"
+                    self._assigned_dids[conn_id] = assigned_did
+
                     await ws.send(json.dumps([
                         ref, ref, topic, "phx_reply",
                         {
@@ -113,7 +118,7 @@ class TestEchoScenario:
         )
 
         # Start receiver in background
-        receiver_task = asyncio.create_task(run_receiver(receiver_ctx))
+        receiver_task = asyncio.create_task(run_receiver(receiver_ctx, on_ready=lambda did: None))
         await asyncio.sleep(0.3)  # let receiver connect
 
         sender_ctx = SenderContext(
@@ -134,3 +139,48 @@ class TestEchoScenario:
             await receiver_task
         except asyncio.CancelledError:
             pass
+
+
+class TestEchoOnReady:
+    async def test_on_ready_called_with_did(self, mock_server: MockPhoenixServer) -> None:
+        receiver_ctx = ScenarioContext(
+            node_url=mock_server.ws_url,
+            api_key="test-key",
+            test_id="test-ready-1",
+            timeout=5.0,
+        )
+        ready_dids: list[str] = []
+        receiver_task = asyncio.create_task(
+            run_receiver(receiver_ctx, on_ready=lambda did: ready_dids.append(did))
+        )
+        await asyncio.sleep(0.3)
+        assert len(ready_dids) == 1
+        assert ready_dids[0].startswith("did:web:")
+        receiver_task.cancel()
+        try:
+            await receiver_task
+        except asyncio.CancelledError:
+            pass
+
+
+class TestEchoExplicitDID:
+    async def test_explicit_did_from_join_topic(self, mock_server: MockPhoenixServer) -> None:
+        explicit_did = "did:web:node:explicit-test"
+        ctx = ScenarioContext(
+            node_url=mock_server.ws_url,
+            api_key="test-key",
+            test_id="test-did-1",
+            timeout=5.0,
+            agent_did=explicit_did,
+        )
+        ready_dids: list[str] = []
+        receiver_task = asyncio.create_task(
+            run_receiver(ctx, on_ready=lambda did: ready_dids.append(did))
+        )
+        await asyncio.sleep(0.3)
+        receiver_task.cancel()
+        try:
+            await receiver_task
+        except asyncio.CancelledError:
+            pass
+        assert ready_dids == [explicit_did]

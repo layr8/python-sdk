@@ -14,6 +14,7 @@ class ScenarioContext:
     api_key: str
     test_id: str
     timeout: float
+    agent_did: str = ""
 
 
 @dataclass

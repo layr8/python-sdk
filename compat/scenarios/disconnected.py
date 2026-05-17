@@ -8,15 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 
 from layr8 import Client, Config, Message, log_errors
 
-from .types import SenderContext, ScenarioResult, elapsed_ms
+from .types import ScenarioContext, SenderContext, ScenarioResult, elapsed_ms
 
 DISCONNECTED_TYPE = "https://layr8.test/disconnected/1.0/request"
 
 
-async def run_receiver(ctx: object) -> None:
+async def run_receiver(
+    ctx: ScenarioContext,
+    on_ready: Callable[[str], None] | None = None,
+) -> None:
     """No receiver for this scenario — the point is that nobody is listening."""
     raise NotImplementedError("disconnected scenario has no receiver")
 
@@ -24,7 +28,7 @@ async def run_receiver(ctx: object) -> None:
 async def run_sender(ctx: SenderContext) -> ScenarioResult:
     """Send to a non-existent DID and verify clean timeout."""
     client = Client(
-        Config(node_url=ctx.node_url, api_key=ctx.api_key),
+        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
         log_errors(),
     )
     start = time.monotonic()

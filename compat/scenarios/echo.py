@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 
 from layr8 import Client, Config, Message, log_errors
 
@@ -13,10 +14,12 @@ ECHO_TYPE = "https://layr8.test/echo/1.0/request"
 ECHO_RESPONSE_TYPE = "https://layr8.test/echo/1.0/response"
 
 
-async def run_receiver(ctx: ScenarioContext) -> None:
+async def run_receiver(
+    ctx: ScenarioContext, on_ready: Callable[[str], None] | None = None
+) -> None:
     """Connect and register echo handler. Blocks until cancelled."""
     client = Client(
-        Config(node_url=ctx.node_url, api_key=ctx.api_key),
+        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
         log_errors(),
     )
 
@@ -29,17 +32,18 @@ async def run_receiver(ctx: ScenarioContext) -> None:
         )
 
     async with client:
+        if on_ready:
+            on_ready(client.did)
         await asyncio.Event().wait()
 
 
 async def run_sender(ctx: SenderContext) -> ScenarioResult:
     """Send an echo request and verify the response."""
     client = Client(
-        Config(node_url=ctx.node_url, api_key=ctx.api_key),
+        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
         log_errors(),
     )
     start = time.monotonic()
-
     try:
         async with client:
             resp = await client.request(
@@ -55,7 +59,9 @@ async def run_sender(ctx: SenderContext) -> ScenarioResult:
             if isinstance(echo, dict) and echo.get("ping") == ctx.test_id:
                 return ScenarioResult("pass", "echo", elapsed_ms(start))
             return ScenarioResult(
-                "fail", "echo", elapsed_ms(start),
+                "fail",
+                "echo",
+                elapsed_ms(start),
                 error=f"unexpected echo: {echo!r}",
             )
     except Exception as e:

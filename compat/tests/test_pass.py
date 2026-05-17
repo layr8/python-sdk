@@ -29,7 +29,7 @@ class TestPassScenario:
             timeout=5.0,
         )
 
-        receiver_task = asyncio.create_task(run_receiver(receiver_ctx))
+        receiver_task = asyncio.create_task(run_receiver(receiver_ctx, on_ready=lambda did: None))
         await asyncio.sleep(0.3)
 
         sender_ctx = SenderContext(

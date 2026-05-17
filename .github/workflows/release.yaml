@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Test
+        run: pytest -v
+
+  compat-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SDK and compat deps
+        run: |
+          pip install -e .
+          pip install -e "compat/[test]"
+
+      - name: Compat unit tests
+        run: cd compat && pytest tests/ -v --ignore=tests/conftest.py -k "not layer1"
+
+  validate-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate tag matches pyproject.toml
+        id: check
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TOML_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$TAG_VERSION" != "$TOML_VERSION" ]; then
+            echo "::error::Tag $TAG_VERSION != pyproject.toml $TOML_VERSION"
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+  publish-pypi:
+    needs: [test, compat-unit, validate-version]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: pip install build && python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-compat-image:
+    needs: [publish-pypi, validate-version]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push compat image
+        run: |
+          VERSION=${{ needs.validate-version.outputs.version }}
+          IMAGE=ghcr.io/layr8/python-sdk/compat
+          docker build \
+            --build-arg SDK_VERSION=$VERSION \
+            -t $IMAGE:$VERSION \
+            -f compat/Dockerfile compat/
+          docker push $IMAGE:$VERSION
+
+  compat-gate:
+    needs: [publish-compat-image, validate-version]
+    uses: layr8/compat-suite/.github/workflows/gate.yml@main
+    with:
+      sdk: python
+      version: ${{ needs.validate-version.outputs.version }}

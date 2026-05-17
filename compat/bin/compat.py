@@ -3,7 +3,7 @@
 Usage:
     python -m bin.compat --list-scenarios
     python -m bin.compat --mode sender --scenario echo --node ws://... --did did:web:...
-    python -m bin.compat --mode receiver --scenario echo --node ws://...
+    python -m bin.compat --mode receiver --scenario echo --node ws://... --did did:web:...
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ def list_scenarios() -> list[str]:
         name = f.stem
         if name.startswith("_") or name == "types":
             continue
-        # Normalize: pass_scenario -> pass
         display = name.removesuffix("_scenario")
         names.append(display)
     return names
@@ -48,7 +47,7 @@ def main() -> None:
     parser.add_argument("--mode", choices=["sender", "receiver"])
     parser.add_argument("--scenario")
     parser.add_argument("--node", help="Cloud-node WebSocket URL")
-    parser.add_argument("--did", help="Receiver DID (sender mode only)")
+    parser.add_argument("--did", help="Agent DID (receiver) or receiver DID (sender)")
     parser.add_argument("--api-key", default=os.environ.get("LAYR8_API_KEY", "test-key"))
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--test-id", default="cli")
@@ -73,8 +72,13 @@ def main() -> None:
             api_key=args.api_key,
             test_id=args.test_id,
             timeout=args.timeout,
+            agent_did=args.did or "",
         )
-        asyncio.run(mod.run_receiver(ctx))
+
+        def on_ready(did: str) -> None:
+            print(json.dumps({"status": "ready", "did": did}), flush=True)
+
+        asyncio.run(mod.run_receiver(ctx, on_ready=on_ready))
     elif args.mode == "sender":
         if not args.did:
             parser.error("--did is required in sender mode")

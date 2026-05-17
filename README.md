@@ -500,6 +500,24 @@ pytest           # Run all tests
 pytest -v        # Verbose output
 ```
 
+### Compatibility Testing
+
+The `compat/` directory contains the compatibility test suite — scenarios that validate the SDK against real cloud-node versions and cross-language interoperability with other Layr8 SDKs.
+
+**Architecture:** The compat suite uses a hexagonal architecture:
+
+- **Scenarios** (`compat/scenarios/`) — pure async Python, no framework dependencies. Each scenario exposes `run_receiver(ctx, on_ready=)` and `run_sender(ctx)` functions.
+- **Layer 1** (`compat/tests/`) — pytest + testcontainers adapter. Spins up real cloud-node Docker containers and runs scenarios against them.
+- **Layer 2** (`compat/bin/compat.py`) — CLI adapter for the compat-suite orchestrator. Implements the standard interface: `--mode sender|receiver --scenario <name> --node <url> --did <did>`.
+
+```bash
+# Unit tests (mock server, no Docker needed)
+cd compat && pytest tests/ -v --ignore=tests/conftest.py
+
+# Layer 1 integration tests (requires Docker)
+cd compat && pip install -e ".[test]" && pytest tests/ -v
+```
+
 ## Architecture
 
 The SDK is structured around a small set of types:
