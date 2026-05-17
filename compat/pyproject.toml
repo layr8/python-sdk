@@ -16,6 +16,7 @@ test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.25",
     "testcontainers>=4.0",
+    "websockets>=13.0",
 ]
 
 [tool.pytest.ini_options]

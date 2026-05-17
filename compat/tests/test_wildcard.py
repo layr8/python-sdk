@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import pytest
 
-from scenarios.wildcard import run_receiver, run_sender, WILDCARD_RESPONSE_TYPE
+from scenarios.wildcard import run_receiver, run_sender
 from scenarios.types import ScenarioContext, SenderContext
 from tests.test_echo import MockPhoenixServer
 

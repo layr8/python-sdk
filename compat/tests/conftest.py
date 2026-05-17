@@ -35,15 +35,6 @@ def _load_cloud_node_versions() -> list[str]:
     return [data["min"]]
 
 
-def _excluded_versions() -> dict[str, str]:
-    """Load excluded versions and their reasons."""
-    if not CLOUD_NODES_PATH.exists():
-        return {}
-    with open(CLOUD_NODES_PATH) as f:
-        data = json.load(f)
-    return data.get("exclude", {})
-
-
 CLOUD_NODE_VERSIONS = _load_cloud_node_versions()
 
 
