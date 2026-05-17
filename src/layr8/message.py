@@ -25,6 +25,29 @@ class MessageContext:
 
 
 @dataclass
+class AttachmentData:
+    """Attachment payload per DIDComm v2 spec."""
+    base64: str = ""
+    json: Any = None
+    jws: Any = None
+    hash: str = ""
+    links: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Attachment:
+    """A DIDComm v2 attachment."""
+    id: str = ""
+    description: str = ""
+    filename: str = ""
+    media_type: str = ""
+    format: str = ""
+    lastmod_time: int | None = None
+    byte_count: int | None = None
+    data: AttachmentData = field(default_factory=AttachmentData)
+
+
+@dataclass
 class Message:
     """
     A DIDComm v2 message.
@@ -40,6 +63,7 @@ class Message:
     thread_id: str = ""
     parent_thread_id: str = ""
     body: Any = None
+    attachments: list[Attachment] = field(default_factory=list)
     context: MessageContext | None = None
 
     # Internal fields (not part of the public API)
@@ -69,6 +93,61 @@ def generate_id() -> str:
     return str(uuid.uuid4())
 
 
+def _marshal_attachment(att: Attachment) -> dict[str, Any]:
+    """Convert an Attachment to a wire-format dict, omitting empty/None fields."""
+    d: dict[str, Any] = {}
+    if att.id:
+        d["id"] = att.id
+    if att.description:
+        d["description"] = att.description
+    if att.filename:
+        d["filename"] = att.filename
+    if att.media_type:
+        d["media_type"] = att.media_type
+    if att.format:
+        d["format"] = att.format
+    if att.lastmod_time is not None:
+        d["lastmod_time"] = att.lastmod_time
+    if att.byte_count is not None:
+        d["byte_count"] = att.byte_count
+    data: dict[str, Any] = {}
+    if att.data.base64:
+        data["base64"] = att.data.base64
+    if att.data.json is not None:
+        data["json"] = att.data.json
+    if att.data.jws is not None:
+        data["jws"] = att.data.jws
+    if att.data.hash:
+        data["hash"] = att.data.hash
+    if att.data.links:
+        data["links"] = att.data.links
+    if data:
+        d["data"] = data
+    return d
+
+
+def _parse_attachment(raw: dict[str, Any]) -> Attachment:
+    """Parse a wire-format dict into an Attachment."""
+    data_raw = raw.get("data", {})
+    data = AttachmentData(
+        base64=data_raw.get("base64", ""),
+        json=data_raw.get("json"),
+        jws=data_raw.get("jws"),
+        hash=data_raw.get("hash", ""),
+        links=data_raw.get("links", []),
+    )
+    return Attachment(
+        id=raw.get("id", ""),
+        description=raw.get("description", ""),
+        filename=raw.get("filename", ""),
+        media_type=raw.get("media_type", ""),
+        format=raw.get("format", ""),
+        lastmod_time=raw.get("lastmod_time"),
+        byte_count=raw.get("byte_count"),
+        data=data,
+    )
+
+
 def marshal_didcomm(msg: Message) -> dict[str, Any]:
     """Serialize a Message into DIDComm wire format (dict ready for JSON)."""
     env: dict[str, Any] = {
@@ -82,12 +161,16 @@ def marshal_didcomm(msg: Message) -> dict[str, Any]:
         env["thid"] = msg.thread_id
     if msg.parent_thread_id:
         env["pthid"] = msg.parent_thread_id
+    if msg.attachments:
+        env["attachments"] = [_marshal_attachment(a) for a in msg.attachments]
     return env
 
 
 def parse_didcomm(data: dict[str, Any]) -> Message:
     """Parse an inbound cloud-node message (context + plaintext) into a Message."""
     pt = data.get("plaintext", {})
+
+    attachments = [_parse_attachment(a) for a in pt.get("attachments", [])]
 
     msg = Message(
         id=pt.get("id", ""),
@@ -97,6 +180,7 @@ def parse_didcomm(data: dict[str, Any]) -> Message:
         thread_id=pt.get("thid", ""),
         parent_thread_id=pt.get("pthid", ""),
         body=pt.get("body"),
+        attachments=attachments,
         _body_raw=pt.get("body"),
     )
 

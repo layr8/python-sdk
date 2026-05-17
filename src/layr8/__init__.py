@@ -16,11 +16,19 @@ from .errors import (
     ServerRejectError,
     log_errors,
 )
-from .message import Message, MessageContext, SenderCredential
+from .message import (
+    Attachment,
+    AttachmentData,
+    Message,
+    MessageContext,
+    SenderCredential,
+)
 from .presentations import VerifiedPresentation
 from .rest import RESTError
 
 __all__ = [
+    "Attachment",
+    "AttachmentData",
     "Client",
     "Config",
     "Message",
