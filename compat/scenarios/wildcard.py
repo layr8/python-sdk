@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 
 from layr8 import Client, Config, Message, log_errors
 
@@ -16,10 +17,13 @@ WILDCARD_REQUEST_TYPE = "https://layr8.test/wildcard/1.0/request"
 WILDCARD_RESPONSE_TYPE = "https://layr8.test/wildcard/1.0/response"
 
 
-async def run_receiver(ctx: ScenarioContext) -> None:
+async def run_receiver(
+    ctx: ScenarioContext,
+    on_ready: Callable[[str], None] | None = None,
+) -> None:
     """Connect with only a catch-all handler. Blocks until cancelled."""
     client = Client(
-        Config(node_url=ctx.node_url, api_key=ctx.api_key),
+        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
         log_errors(),
     )
 
@@ -32,13 +36,15 @@ async def run_receiver(ctx: ScenarioContext) -> None:
         )
 
     async with client:
+        if on_ready:
+            on_ready(client.did)
         await asyncio.Event().wait()
 
 
 async def run_sender(ctx: SenderContext) -> ScenarioResult:
     """Send a message with an arbitrary type and verify catch-all responds."""
     client = Client(
-        Config(node_url=ctx.node_url, api_key=ctx.api_key),
+        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
         log_errors(),
     )
     start = time.monotonic()
@@ -58,9 +64,7 @@ async def run_sender(ctx: SenderContext) -> ScenarioResult:
             if isinstance(received, dict) and received.get("ping") == ctx.test_id:
                 return ScenarioResult("pass", "wildcard", elapsed_ms(start))
             return ScenarioResult(
-                "fail",
-                "wildcard",
-                elapsed_ms(start),
+                "fail", "wildcard", elapsed_ms(start),
                 error=f"unexpected response: {received!r}",
             )
     except Exception as e:
