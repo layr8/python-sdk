@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "layr8-compat"
+version = "0.1.0"
+description = "Layr8 Python SDK compat-suite scenarios and tests"
+requires-python = ">=3.11"
+dependencies = [
+    "layr8>=0.1.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
+    "testcontainers>=4.0",
+    "websockets>=13.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["scenarios", "bin"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

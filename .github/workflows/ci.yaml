@@ -22,3 +22,21 @@ jobs:
 
       - name: Test
         run: pytest -v
+
+  compat-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SDK and compat deps
+        run: |
+          pip install -e .
+          pip install -e "compat/[test]"
+
+      - name: Compat unit tests
+        run: cd compat && pytest tests/ -v --ignore=tests/conftest.py -k "not layer1"
