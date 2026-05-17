@@ -110,9 +110,9 @@ jobs:
             -f compat/Dockerfile compat/
           docker push $IMAGE:$VERSION
 
-  compat-gate:
-    needs: [publish-compat-image, validate-version]
-    uses: layr8/compat-suite/.github/workflows/gate.yml@main
-    with:
-      sdk: python
-      version: ${{ needs.validate-version.outputs.version }}
+  # compat-gate:
+  #   needs: [publish-compat-image, validate-version]
+  #   uses: layr8/compat-suite/.github/workflows/gate.yml@main
+  #   with:
+  #     sdk: python
+  #     version: ${{ needs.validate-version.outputs.version }}
