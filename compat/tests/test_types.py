@@ -51,3 +51,22 @@ class TestContexts:
         )
         assert ctx.receiver_did == "did:web:receiver"
         assert ctx.node_url == "ws://localhost:4000/plugin_socket/websocket"
+
+    def test_scenario_context_agent_did_default(self) -> None:
+        ctx = ScenarioContext(
+            node_url="ws://localhost:4000/plugin_socket/websocket",
+            api_key="test-key",
+            test_id="test-123",
+            timeout=10.0,
+        )
+        assert ctx.agent_did == ""
+
+    def test_scenario_context_agent_did_explicit(self) -> None:
+        ctx = ScenarioContext(
+            node_url="ws://localhost:4000/plugin_socket/websocket",
+            api_key="test-key",
+            test_id="test-123",
+            timeout=10.0,
+            agent_did="did:web:node:agent-1",
+        )
+        assert ctx.agent_did == "did:web:node:agent-1"
