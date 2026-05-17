@@ -33,10 +33,7 @@ class MockPhoenixServer:
 
     async def _handler(self, ws: websockets.asyncio.server.ServerConnection) -> None:
         self._connections.append(ws)
-        self._did_counter += 1
         conn_id = id(ws)
-        assigned_did = f"did:web:node:agent-{self._did_counter}"
-        self._assigned_dids[conn_id] = assigned_did
 
         try:
             async for raw in ws:
@@ -44,6 +41,14 @@ class MockPhoenixServer:
                 join_ref, ref, topic, event, payload = arr
 
                 if event == "phx_join":
+                    topic_did = topic.removeprefix("plugins:")
+                    if topic_did:
+                        assigned_did = topic_did
+                    else:
+                        self._did_counter += 1
+                        assigned_did = f"did:web:node:agent-{self._did_counter}"
+                    self._assigned_dids[conn_id] = assigned_did
+
                     await ws.send(json.dumps([
                         ref, ref, topic, "phx_reply",
                         {
