@@ -108,18 +108,6 @@ class TestUnmarshalBody:
         assert body.message == "ping"
 
 
-class TestAck:
-    def test_calls_ack_fn(self) -> None:
-        called_with: list[str] = []
-        msg = Message(id="msg-1", _ack_fn=lambda mid: called_with.append(mid))
-        msg.ack()
-        assert called_with == ["msg-1"]
-
-    def test_noop_without_ack_fn(self) -> None:
-        msg = Message(id="msg-1")
-        msg.ack()  # should not raise
-
-
 class TestAttachmentMarshal:
     def test_marshal_with_attachments(self) -> None:
         """Message with attachments marshals correctly."""

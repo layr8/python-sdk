@@ -1,9 +1,9 @@
 """
-Durable Handler — persist messages to a file before acknowledging.
+Durable Handler — persist messages to a file before returning.
 
-Demonstrates manual ack: messages are only acknowledged after they
-are safely written to disk. If the process crashes between receive
-and ack, the cloud-node redelivers the message.
+Demonstrates durable processing: messages are only confirmed to the
+cloud-node after the handler completes. If the process crashes mid-handler,
+the cloud-node redelivers the message.
 
 Messages are appended as JSON lines to messages.jsonl.
 
@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 async def main() -> None:
     client = Client(Config(), log_errors())
 
-    @client.handle("https://layr8.io/protocols/order/1.0/created", manual_ack=True)
+    @client.handle("https://layr8.io/protocols/order/1.0/created")
     async def handle_order(msg: Message) -> None:
         record = json.dumps({
             "id": msg.id,
@@ -42,14 +42,13 @@ async def main() -> None:
             "body": msg.body,
         })
 
-        # Persist first — if this fails, the message is NOT acked
-        # and the cloud-node will redeliver it.
+        # Persist first — if this crashes, the handler never returns,
+        # so the cloud-node will redeliver the message.
         with open(FILE_PATH, "a") as f:
             f.write(record + "\n")
             f.flush()
 
-        msg.ack()  # safe to ack now
-        log.info("persisted and acked message %s from %s", msg.id, msg.from_)
+        log.info("persisted message %s from %s", msg.id, msg.from_)
         return None
 
     stop = asyncio.Event()

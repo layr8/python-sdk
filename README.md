@@ -109,6 +109,7 @@ A handler receives a `Message` and returns:
 |---|---|
 | `Message(...)` | Sends response to the sender. `from_`, `to`, and `thread_id` are auto-filled. |
 | `None` | Fire-and-forget — no response sent. |
+| `PASS` | Decline to handle — lets the cloud-node route elsewhere. |
 | Raised exception | Sends a DIDComm [problem report](https://identity.foundation/didcomm-messaging/spec/#problem-reports) to the sender. |
 
 ```python
@@ -130,6 +131,22 @@ client.handle("https://layr8.io/protocols/echo/1.0/request", echo_handler)
 #### Protocol Registration
 
 The SDK automatically derives protocol base URIs from your handler message types and registers them with the cloud-node on connect. For example, handling `https://layr8.io/protocols/echo/1.0/request` registers the protocol `https://layr8.io/protocols/echo/1.0`.
+
+### Wildcard Handler
+
+Register a catch-all for any message type not matched by a specific handler:
+
+```python
+from layr8 import PASS
+
+@client.handle_all
+async def catch_all(msg: Message) -> Message | None:
+    if msg.type.startswith("https://myorg.com/"):
+        return Message(type=msg.type + "/ack", body={"ok": True})
+    return PASS  # decline — let the cloud-node route elsewhere
+```
+
+Dispatch priority: specific handler > catch-all > auto-pass to cloud-node.
 
 ## Sending Messages
 
@@ -208,20 +225,6 @@ client = Client(Config(
 # Environment-only configuration
 # Set LAYR8_NODE_URL, LAYR8_API_KEY, LAYR8_AGENT_DID
 client = Client(Config(), log_errors())
-```
-
-## Handler Options
-
-### Manual Acknowledgment
-
-By default, messages are acknowledged to the cloud-node before the handler runs (auto-ack). For handlers where you need guaranteed processing, use manual ack to acknowledge only after successful execution. Unacknowledged messages are redelivered by the cloud-node.
-
-```python
-@client.handle(query_type, manual_ack=True)
-async def handle_query(msg: Message) -> Message:
-    result = await execute_query(msg)
-    msg.ack()  # explicitly acknowledge after success
-    return Message(type=result_type, body=result)
 ```
 
 ## Connection Lifecycle
@@ -470,7 +473,7 @@ LAYR8_API_KEY=your-key python examples/chat.py did:web:friend:chat-agent
 
 ### Durable Handler
 
-Persist-then-ack pattern: writes inbound messages to a JSON-lines file before acknowledging. If the process crashes before ack, the cloud-node redelivers. Demonstrates `manual_ack` with zero external dependencies.
+Persist-then-return pattern for durable processing: writes inbound messages to a JSON-lines file before returning. If the process crashes mid-handler, the cloud-node redelivers the message.
 
 ```bash
 LAYR8_API_KEY=your-key python examples/durable_handler.py

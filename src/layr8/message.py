@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass
-class SenderCredential:
+class Credential:
     """A sender credential from the cloud-node."""
 
     id: str = ""
@@ -21,7 +21,7 @@ class MessageContext:
 
     recipient: str = ""
     authorized: bool = False
-    sender_credentials: list[SenderCredential] = field(default_factory=list)
+    sender_credentials: list[Credential] = field(default_factory=list)
 
 
 @dataclass
@@ -68,7 +68,6 @@ class Message:
 
     # Internal fields (not part of the public API)
     _body_raw: Any = field(default=None, repr=False)
-    _ack_fn: Callable[..., Any] | None = field(default=None, repr=False)
 
     def unmarshal_body(self, cls: type | None = None) -> Any:
         """
@@ -81,11 +80,6 @@ class Message:
         if cls is not None and hasattr(cls, "__dataclass_fields__"):
             return cls(**raw)
         return raw
-
-    def ack(self) -> None:
-        """Manually acknowledge this message (only with manual_ack=True)."""
-        if self._ack_fn is not None:
-            self._ack_fn(self.id)
 
 
 def generate_id() -> str:
@@ -187,7 +181,7 @@ def parse_didcomm(data: dict[str, Any]) -> Message:
     ctx = data.get("context")
     if ctx:
         creds = [
-            SenderCredential(
+            Credential(
                 id=c.get("credential_subject", {}).get("id", ""),
                 name=c.get("credential_subject", {}).get("name", ""),
             )

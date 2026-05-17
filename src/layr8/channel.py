@@ -96,6 +96,7 @@ class PhoenixChannel:
         # by the `websockets` library's built-in ping/pong mechanism, made
         # explicit in the connect() call below — closes #4.
         self._last_frame_at = time.monotonic()
+        self._reply_protocol: bool = False
 
     async def connect(self, protocols: list[str]) -> None:
         """Establish WebSocket connection and join the Phoenix channel."""
@@ -155,6 +156,7 @@ class PhoenixChannel:
 
         join_payload: dict[str, Any] = {
             "payload_types": protocols,
+            "reply_protocol": True,
             "did_spec": {
                 "mode": "Create",
                 "storage": "ephemeral",
@@ -190,6 +192,8 @@ class PhoenixChannel:
         response = reply.get("response", {})
         if isinstance(response, dict) and response.get("did"):
             self._assigned_did = response["did"]
+        capabilities = response.get("capabilities", []) if isinstance(response, dict) else []
+        self._reply_protocol = "reply_protocol/1" in capabilities
 
     async def send(self, event: str, payload: Any) -> ServerReply:
         """Send a Phoenix Channel event and wait for server reply."""
@@ -220,6 +224,10 @@ class PhoenixChannel:
     @property
     def assigned_did(self) -> str:
         return self._assigned_did
+
+    @property
+    def reply_protocol(self) -> bool:
+        return self._reply_protocol
 
     async def close(self) -> None:
         """Send phx_leave and shut down gracefully."""

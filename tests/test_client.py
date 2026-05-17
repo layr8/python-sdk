@@ -10,7 +10,7 @@ import pytest
 import websockets
 import websockets.asyncio.server
 
-from layr8 import Client, Config, Message, ProblemReportError, ServerRejectError, ErrorKind, SDKError, log_errors
+from layr8 import Client, Config, Message, PASS, ProblemReportError, ServerRejectError, ErrorKind, SDKError, log_errors
 
 
 def _discard_errors(err: SDKError) -> None:
@@ -642,5 +642,347 @@ class TestClient:
 
         with pytest.raises(ServerRejectError, match="not_authorized"):
             await client.send(Message(type="https://didcomm.org/basicmessage/2.0/message", to=["did:web:bob"], body={}))
+
+        await client.close()
+
+
+def _reply_protocol_handler(mock_server: MockPhoenixServer):
+    """Server handler that returns capabilities with reply_protocol/1."""
+    def handler(msg: dict[str, Any]) -> None:
+        if msg["event"] == "phx_join":
+            asyncio.ensure_future(
+                mock_server.send_to_client(
+                    msg["ref"], msg["ref"], msg["topic"],
+                    "phx_reply",
+                    {
+                        "status": "ok",
+                        "response": {
+                            "did": "did:web:node:test",
+                            "capabilities": ["reply_protocol/1"],
+                        },
+                    },
+                )
+            )
+        else:
+            if msg.get("ref"):
+                asyncio.ensure_future(
+                    mock_server.send_to_client(
+                        None, msg["ref"], msg["topic"],
+                        "phx_reply", {"status": "ok", "response": {}},
+                    )
+                )
+    return handler
+
+
+class TestReplyProtocol:
+    async def test_handler_returns_message_sends_handled(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        mock_server.on_msg = _reply_protocol_handler(mock_server)
+
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="did:web:alice",
+        ), _discard_errors)
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def handler(msg: Message) -> Message:
+            return Message(
+                type="https://layr8.io/protocols/echo/1.0/response",
+                body={"echo": msg.unmarshal_body().get("message")},
+            )
+
+        await client.connect()
+        mock_server.clear_received()
+
+        await mock_server.send_to_client(
+            None, None, "plugins:did:web:alice", "message",
+            {
+                "plaintext": {
+                    "id": "req-1",
+                    "type": "https://layr8.io/protocols/echo/1.0/request",
+                    "from": "did:web:bob",
+                    "to": ["did:web:alice"],
+                    "body": {"message": "ping"},
+                },
+            },
+        )
+        await asyncio.sleep(0.5)
+
+        received = mock_server.get_received()
+        reply_events = [r for r in received if r["event"] == "dispatch_reply"]
+        assert len(reply_events) == 1
+        assert reply_events[0]["payload"]["status"] == "handled"
+        assert reply_events[0]["payload"]["message_id"] == "req-1"
+
+        # Response message should have been sent
+        msg_events = [r for r in received if r["event"] == "message"]
+        assert len(msg_events) == 1
+
+        # NO ack should be sent in new mode
+        ack_events = [r for r in received if r["event"] == "ack"]
+        assert len(ack_events) == 0
+
+        await client.close()
+
+    async def test_handler_returns_none_sends_handled(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        mock_server.on_msg = _reply_protocol_handler(mock_server)
+
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="did:web:alice",
+        ), _discard_errors)
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def handler(msg: Message) -> None:
+            return None
+
+        await client.connect()
+        mock_server.clear_received()
+
+        await mock_server.send_to_client(
+            None, None, "plugins:did:web:alice", "message",
+            {
+                "plaintext": {
+                    "id": "req-2",
+                    "type": "https://layr8.io/protocols/echo/1.0/request",
+                    "from": "did:web:bob",
+                    "to": ["did:web:alice"],
+                    "body": {"message": "ping"},
+                },
+            },
+        )
+        await asyncio.sleep(0.5)
+
+        received = mock_server.get_received()
+        reply_events = [r for r in received if r["event"] == "dispatch_reply"]
+        assert len(reply_events) == 1
+        assert reply_events[0]["payload"]["status"] == "handled"
+
+        await client.close()
+
+    async def test_handler_returns_pass_sends_pass(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        mock_server.on_msg = _reply_protocol_handler(mock_server)
+
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="did:web:alice",
+        ), _discard_errors)
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def handler(msg: Message) -> Message | None:
+            return PASS  # type: ignore[return-value]
+
+        await client.connect()
+        mock_server.clear_received()
+
+        await mock_server.send_to_client(
+            None, None, "plugins:did:web:alice", "message",
+            {
+                "plaintext": {
+                    "id": "req-3",
+                    "type": "https://layr8.io/protocols/echo/1.0/request",
+                    "from": "did:web:bob",
+                    "to": ["did:web:alice"],
+                    "body": {"message": "ping"},
+                },
+            },
+        )
+        await asyncio.sleep(0.5)
+
+        received = mock_server.get_received()
+        reply_events = [r for r in received if r["event"] == "dispatch_reply"]
+        assert len(reply_events) == 1
+        assert reply_events[0]["payload"]["status"] == "pass"
+
+        await client.close()
+
+    async def test_handler_raises_sends_error(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        mock_server.on_msg = _reply_protocol_handler(mock_server)
+
+        errors: list[SDKError] = []
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="did:web:alice",
+        ), errors.append)
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def handler(msg: Message) -> Message:
+            raise ValueError("bad input")
+
+        await client.connect()
+        mock_server.clear_received()
+
+        await mock_server.send_to_client(
+            None, None, "plugins:did:web:alice", "message",
+            {
+                "plaintext": {
+                    "id": "req-4",
+                    "type": "https://layr8.io/protocols/echo/1.0/request",
+                    "from": "did:web:bob",
+                    "to": ["did:web:alice"],
+                    "body": {"message": "ping"},
+                },
+            },
+        )
+        await asyncio.sleep(0.5)
+
+        received = mock_server.get_received()
+        reply_events = [r for r in received if r["event"] == "dispatch_reply"]
+        assert len(reply_events) == 1
+        assert reply_events[0]["payload"]["status"] == "error"
+        assert reply_events[0]["payload"]["code"] == "ValueError"
+        assert reply_events[0]["payload"]["message"] == "bad input"
+
+        # Problem report should also have been sent
+        msg_events = [r for r in received if r["event"] == "message"]
+        assert len(msg_events) == 1
+
+        # Error callback should have been called
+        assert any(e.kind == ErrorKind.HANDLER_EXCEPTION for e in errors)
+
+        await client.close()
+
+    async def test_no_handler_sends_pass(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        mock_server.on_msg = _reply_protocol_handler(mock_server)
+
+        errors: list[SDKError] = []
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="did:web:alice",
+        ), errors.append)
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def handler(msg: Message) -> None:
+            return None
+
+        await client.connect()
+        mock_server.clear_received()
+
+        # Send a message type that has no handler
+        await mock_server.send_to_client(
+            None, None, "plugins:did:web:alice", "message",
+            {
+                "plaintext": {
+                    "id": "req-5",
+                    "type": "https://unknown.org/protocol/1.0/unknown",
+                    "from": "did:web:bob",
+                    "to": ["did:web:alice"],
+                    "body": {},
+                },
+            },
+        )
+        await asyncio.sleep(0.5)
+
+        received = mock_server.get_received()
+        reply_events = [r for r in received if r["event"] == "dispatch_reply"]
+        assert len(reply_events) == 1
+        assert reply_events[0]["payload"]["status"] == "pass"
+
+        # NO_HANDLER error should have been reported
+        assert any(e.kind == ErrorKind.NO_HANDLER for e in errors)
+
+        await client.close()
+
+    async def test_catch_all_invoked(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        mock_server.on_msg = _reply_protocol_handler(mock_server)
+
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="did:web:alice",
+        ), _discard_errors)
+
+        received_msg: asyncio.Future[Message] = asyncio.get_running_loop().create_future()
+
+        @client.handle_all
+        async def catch_all(msg: Message) -> None:
+            if not received_msg.done():
+                received_msg.set_result(msg)
+            return None
+
+        await client.connect()
+        mock_server.clear_received()
+
+        await mock_server.send_to_client(
+            None, None, "plugins:did:web:alice", "message",
+            {
+                "plaintext": {
+                    "id": "req-6",
+                    "type": "https://unknown.org/protocol/1.0/unknown",
+                    "from": "did:web:bob",
+                    "to": ["did:web:alice"],
+                    "body": {"data": "test"},
+                },
+            },
+        )
+
+        msg = await asyncio.wait_for(received_msg, timeout=2)
+        assert msg.type == "https://unknown.org/protocol/1.0/unknown"
+
+        await asyncio.sleep(0.3)
+        received = mock_server.get_received()
+        reply_events = [r for r in received if r["event"] == "dispatch_reply"]
+        assert len(reply_events) == 1
+        assert reply_events[0]["payload"]["status"] == "handled"
+
+        await client.close()
+
+    async def test_legacy_mode_sends_ack(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        # Default mock_server handler does NOT return capabilities,
+        # so reply_protocol will be False (legacy mode).
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="did:web:alice",
+        ), _discard_errors)
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def handler(msg: Message) -> None:
+            return None
+
+        await client.connect()
+        mock_server.clear_received()
+
+        await mock_server.send_to_client(
+            None, None, "plugins:did:web:alice", "message",
+            {
+                "plaintext": {
+                    "id": "req-7",
+                    "type": "https://layr8.io/protocols/echo/1.0/request",
+                    "from": "did:web:bob",
+                    "to": ["did:web:alice"],
+                    "body": {"message": "ping"},
+                },
+            },
+        )
+        await asyncio.sleep(0.5)
+
+        received = mock_server.get_received()
+
+        # Legacy mode should send ack
+        ack_events = [r for r in received if r["event"] == "ack"]
+        assert len(ack_events) == 1
+
+        # Legacy mode should NOT send dispatch_reply
+        reply_events = [r for r in received if r["event"] == "dispatch_reply"]
+        assert len(reply_events) == 0
 
         await client.close()
