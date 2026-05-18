@@ -15,6 +15,7 @@ from layr8 import Client, Config, Message, log_errors
 from .types import ScenarioContext, SenderContext, ScenarioResult, elapsed_ms
 
 DISCONNECTED_TYPE = "https://layr8.test/disconnected/1.0/request"
+DISCONNECTED_PROTOCOL = "https://layr8.test/disconnected/1.0"
 
 
 async def run_receiver(
@@ -23,7 +24,12 @@ async def run_receiver(
 ) -> None:
     """Connect to the cloud-node and wait until killed."""
     client = Client(
-        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
+        Config(
+            node_url=ctx.node_url,
+            api_key=ctx.api_key,
+            agent_did=ctx.agent_did,
+            protocols=[DISCONNECTED_PROTOCOL],
+        ),
         log_errors(),
     )
 
@@ -31,9 +37,6 @@ async def run_receiver(
         if on_ready:
             on_ready(client.did)
         await asyncio.Event().wait()
-
-
-DISCONNECTED_PROTOCOL = "https://layr8.test/disconnected/1.0"
 
 
 async def run_sender(ctx: SenderContext) -> ScenarioResult:

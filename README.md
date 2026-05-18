@@ -132,6 +132,18 @@ client.handle("https://layr8.io/protocols/echo/1.0/request", echo_handler)
 
 The SDK automatically derives protocol base URIs from your handler message types and registers them with the cloud-node on connect. For example, handling `https://layr8.io/protocols/echo/1.0/request` registers the protocol `https://layr8.io/protocols/echo/1.0`.
 
+For sender-only clients that use `request()` without registering handlers, specify protocols explicitly via `Config.protocols`:
+
+```python
+client = Client(Config(
+    node_url="ws://localhost:4000/plugin_socket/websocket",
+    api_key="my-key",
+    protocols=["https://layr8.io/protocols/echo/1.0"],
+), log_errors())
+```
+
+Config protocols are merged with handler-derived protocols (deduplicated). The cloud-node requires at least one protocol on join.
+
 ### Wildcard Handler
 
 Register a catch-all for any message type not matched by a specific handler:
@@ -211,6 +223,7 @@ Configuration can be set explicitly or via environment variables. Environment va
 | `node_url` | `LAYR8_NODE_URL` | Yes | WebSocket URL of the cloud-node |
 | `api_key` | `LAYR8_API_KEY` | Yes | API key for authentication |
 | `agent_did` | `LAYR8_AGENT_DID` | No | Agent DID identity |
+| `protocols` | — | No | Additional protocol URIs to advertise on join |
 
 If `agent_did` is not provided, the cloud-node creates an ephemeral DID on connect. Retrieve it with `client.did`.
 
