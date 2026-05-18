@@ -29,6 +29,14 @@ This is a public repository. Every commit is visible to the world.
 - Run tests before every commit
 - Integration tests require a local dev environment with two cloud-nodes (alice-test, bob-test)
 
+## Cloud-Node Protocol Requirement
+
+The cloud-node **requires at least one protocol** in `payload_types` when joining a Phoenix channel. Clients that join with an empty protocol list get rejected with `e.join.plugin.protocol.missing`.
+
+- Handlers automatically derive protocols (e.g., registering a handler for `https://layr8.test/echo/1.0/request` advertises `https://layr8.test/echo/1.0`).
+- Sender-only clients (no handlers, only `request()`) must specify protocols via `Config.protocols`.
+- Compat scenario senders and receivers that don't register handlers must always pass their protocol through `Config.protocols`.
+
 ## Conventions
 
 - Async/await with `asyncio`
