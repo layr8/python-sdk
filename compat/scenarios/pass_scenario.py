@@ -37,10 +37,18 @@ async def run_receiver(
         await asyncio.Event().wait()
 
 
+PASS_PROTOCOL = "https://layr8.test/pass/1.0"
+
+
 async def run_sender(ctx: SenderContext) -> ScenarioResult:
     """Send a message and verify no response comes back (timeout expected)."""
     client = Client(
-        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
+        Config(
+            node_url=ctx.node_url,
+            api_key=ctx.api_key,
+            agent_did=ctx.agent_did,
+            protocols=[PASS_PROTOCOL],
+        ),
         log_errors(),
     )
     start = time.monotonic()

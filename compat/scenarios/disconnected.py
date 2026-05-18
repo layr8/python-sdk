@@ -25,10 +25,18 @@ async def run_receiver(
     raise NotImplementedError("disconnected scenario has no receiver")
 
 
+DISCONNECTED_PROTOCOL = "https://layr8.test/disconnected/1.0"
+
+
 async def run_sender(ctx: SenderContext) -> ScenarioResult:
     """Send to a non-existent DID and verify clean timeout."""
     client = Client(
-        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
+        Config(
+            node_url=ctx.node_url,
+            api_key=ctx.api_key,
+            agent_did=ctx.agent_did,
+            protocols=[DISCONNECTED_PROTOCOL],
+        ),
         log_errors(),
     )
     start = time.monotonic()
