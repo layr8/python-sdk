@@ -49,7 +49,7 @@ def main() -> None:
     parser.add_argument("--node", help="Cloud-node WebSocket URL")
     parser.add_argument("--did", help="Agent DID (receiver) or receiver DID (sender)")
     parser.add_argument("--api-key", default=os.environ.get("LAYR8_API_KEY", "test-key"))
-    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--test-id", default="cli")
     parser.add_argument("--list-scenarios", action="store_true")
     args = parser.parse_args()
@@ -82,12 +82,19 @@ def main() -> None:
     elif args.mode == "sender":
         if not args.did:
             parser.error("--did is required in sender mode")
+        # Generate a sender DID from the node URL — cloud-node
+        # rejects empty DIDs in the join topic.
+        from urllib.parse import urlparse
+        import uuid
+        node_host = urlparse(args.node).hostname or "localhost"
+        sender_did = f"did:web:{node_host}%3A9000:compat:sender-{uuid.uuid4()}"
         ctx = SenderContext(
             node_url=args.node,
             api_key=args.api_key,
             test_id=args.test_id,
             timeout=args.timeout,
             receiver_did=args.did,
+            agent_did=sender_did,
         )
         result = asyncio.run(mod.run_sender(ctx))
         print(json.dumps({
