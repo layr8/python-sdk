@@ -87,7 +87,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
   publish-compat-image:
-    needs: [publish-pypi, validate-version]
+    needs: [test, compat-unit, validate-version]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -106,10 +106,17 @@ jobs:
         run: |
           VERSION=${{ needs.validate-version.outputs.version }}
           IMAGE=ghcr.io/layr8/python-sdk/compat
+
+          # Stage SDK source for the Docker build context.
+          # Install from source instead of PyPI to avoid
+          # propagation delay after publish-pypi.
+          mkdir -p _build/sdk
+          cp -r src pyproject.toml README.md _build/sdk/
+          cp -r compat _build/compat
+
           docker build \
-            --build-arg SDK_VERSION=$VERSION \
             -t $IMAGE:$VERSION \
-            -f compat/Dockerfile compat/
+            -f compat/Dockerfile _build/
           docker push $IMAGE:$VERSION
 
   compat-gate:
