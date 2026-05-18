@@ -37,10 +37,18 @@ async def run_receiver(
         await asyncio.Event().wait()
 
 
+ECHO_PROTOCOL = "https://layr8.test/echo/1.0"
+
+
 async def run_sender(ctx: SenderContext) -> ScenarioResult:
     """Send an echo request and verify the response."""
     client = Client(
-        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
+        Config(
+            node_url=ctx.node_url,
+            api_key=ctx.api_key,
+            agent_did=ctx.agent_did,
+            protocols=[ECHO_PROTOCOL],
+        ),
         log_errors(),
     )
     start = time.monotonic()

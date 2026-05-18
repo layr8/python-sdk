@@ -622,6 +622,85 @@ class TestClient:
 
         await client.close()
 
+    async def test_config_protocols_included_in_join(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        """Config.protocols are merged with handler-derived protocols in join."""
+        join_payload: dict[str, Any] = {}
+
+        def handler(msg: dict[str, Any]) -> None:
+            if msg["event"] == "phx_join":
+                join_payload.update(msg["payload"])
+                asyncio.ensure_future(
+                    mock_server.send_to_client(
+                        msg["ref"], msg["ref"], msg["topic"],
+                        "phx_reply", {"status": "ok", "response": {}},
+                    )
+                )
+            elif msg.get("ref"):
+                asyncio.ensure_future(
+                    mock_server.send_to_client(
+                        None, msg["ref"], msg["topic"],
+                        "phx_reply", {"status": "ok", "response": {}},
+                    )
+                )
+
+        mock_server.on_msg = handler
+
+        # No handlers registered — only config protocols
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="did:web:sender",
+            protocols=["https://layr8.test/echo/1.0"],
+        ), _discard_errors)
+
+        await client.connect()
+        assert "https://layr8.test/echo/1.0" in join_payload["payload_types"]
+        await client.close()
+
+    async def test_config_protocols_merged_with_handlers(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        """Config.protocols are merged (not replaced) with handler protocols."""
+        join_payload: dict[str, Any] = {}
+
+        def handler(msg: dict[str, Any]) -> None:
+            if msg["event"] == "phx_join":
+                join_payload.update(msg["payload"])
+                asyncio.ensure_future(
+                    mock_server.send_to_client(
+                        msg["ref"], msg["ref"], msg["topic"],
+                        "phx_reply", {"status": "ok", "response": {}},
+                    )
+                )
+            elif msg.get("ref"):
+                asyncio.ensure_future(
+                    mock_server.send_to_client(
+                        None, msg["ref"], msg["topic"],
+                        "phx_reply", {"status": "ok", "response": {}},
+                    )
+                )
+
+        mock_server.on_msg = handler
+
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="did:web:sender",
+            protocols=["https://layr8.test/extra/1.0"],
+        ), _discard_errors)
+
+        @client.handle("https://layr8.test/echo/1.0/request")
+        async def echo(msg: Message) -> None:
+            return None
+
+        await client.connect()
+        protos = join_payload["payload_types"]
+        assert "https://layr8.test/echo/1.0" in protos
+        assert "https://layr8.test/extra/1.0" in protos
+        await client.close()
+
     async def test_send_server_reject(self, mock_server: MockPhoenixServer) -> None:
         # Override to reject messages
         def handler(msg: dict[str, Any]) -> None:

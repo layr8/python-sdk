@@ -56,3 +56,15 @@ class TestResolveConfig:
     def test_allows_empty_agent_did(self) -> None:
         cfg = resolve_config(Config(node_url="ws://localhost:4000", api_key="key"))
         assert cfg.agent_did == ""
+
+    def test_preserves_protocols(self) -> None:
+        cfg = resolve_config(Config(
+            node_url="ws://localhost:4000",
+            api_key="key",
+            protocols=["https://layr8.test/echo/1.0"],
+        ))
+        assert cfg.protocols == ["https://layr8.test/echo/1.0"]
+
+    def test_protocols_default_empty(self) -> None:
+        cfg = resolve_config(Config(node_url="ws://localhost:4000", api_key="key"))
+        assert cfg.protocols == []

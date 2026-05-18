@@ -41,10 +41,18 @@ async def run_receiver(
         await asyncio.Event().wait()
 
 
+WILDCARD_PROTOCOL = "https://layr8.test/wildcard/1.0"
+
+
 async def run_sender(ctx: SenderContext) -> ScenarioResult:
     """Send a message with an arbitrary type and verify catch-all responds."""
     client = Client(
-        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
+        Config(
+            node_url=ctx.node_url,
+            api_key=ctx.api_key,
+            agent_did=ctx.agent_did,
+            protocols=[WILDCARD_PROTOCOL],
+        ),
         log_errors(),
     )
     start = time.monotonic()

@@ -153,7 +153,9 @@ class Client:
         if self._closed:
             raise ClientClosedError()
 
-        protocols = self._registry.protocols()
+        protocols = list(dict.fromkeys(
+            self._cfg.protocols + self._registry.protocols()
+        ))
 
         channel = PhoenixChannel(
             self._cfg.node_url,

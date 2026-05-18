@@ -17,11 +17,13 @@ class Config:
       - node_url  -> LAYR8_NODE_URL (required)
       - api_key   -> LAYR8_API_KEY (required)
       - agent_did -> LAYR8_AGENT_DID (optional)
+      - protocols -> additional protocol URIs to advertise on join
     """
 
     node_url: str = ""
     api_key: str = ""
     agent_did: str = ""
+    protocols: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,7 @@ class ResolvedConfig:
     node_url: str
     api_key: str
     agent_did: str
+    protocols: list[str]
 
 
 def resolve_config(cfg: Config) -> ResolvedConfig:
@@ -56,4 +59,6 @@ def resolve_config(cfg: Config) -> ResolvedConfig:
             "api_key is required (set in Config or LAYR8_API_KEY env)"
         )
 
-    return ResolvedConfig(node_url=node_url, api_key=api_key, agent_did=agent_did)
+    protocols = list(cfg.protocols) if cfg.protocols else []
+
+    return ResolvedConfig(node_url=node_url, api_key=api_key, agent_did=agent_did, protocols=protocols)
