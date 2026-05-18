@@ -1,11 +1,11 @@
 FROM python:3.12-alpine
 WORKDIR /app
 
-ARG SDK_VERSION
-RUN pip install --no-cache-dir layr8==${SDK_VERSION}
+COPY sdk/ /tmp/sdk/
+RUN pip install --no-cache-dir /tmp/sdk/ && rm -rf /tmp/sdk/
 
-COPY scenarios/ ./scenarios/
-COPY bin/ ./bin/
+COPY compat/scenarios/ ./scenarios/
+COPY compat/bin/ ./bin/
 
 LABEL org.opencontainers.image.source=https://github.com/layr8/python-sdk
 
