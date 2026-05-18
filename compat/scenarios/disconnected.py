@@ -21,8 +21,16 @@ async def run_receiver(
     ctx: ScenarioContext,
     on_ready: Callable[[str], None] | None = None,
 ) -> None:
-    """No receiver for this scenario — the point is that nobody is listening."""
-    raise NotImplementedError("disconnected scenario has no receiver")
+    """Connect to the cloud-node and wait until killed."""
+    client = Client(
+        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
+        log_errors(),
+    )
+
+    async with client:
+        if on_ready:
+            on_ready(client.did)
+        await asyncio.Event().wait()
 
 
 DISCONNECTED_PROTOCOL = "https://layr8.test/disconnected/1.0"
