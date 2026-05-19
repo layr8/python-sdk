@@ -15,7 +15,9 @@ from layr8 import Client, Config, Message, log_errors
 from .types import ScenarioContext, SenderContext, ScenarioResult, elapsed_ms
 
 ECHO_TYPE = "https://layr8.test/echo/1.0/request"
+ECHO_RESPONSE_TYPE = "https://layr8.test/echo/1.0/response"
 PING_TYPE = "https://didcomm.org/trust-ping/2.0/ping"
+PING_RESPONSE_TYPE = "https://didcomm.org/trust-ping/2.0/ping-response"
 WILDCARD_RESPONSE_TYPE = "https://layr8.test/wildcard/1.0/response"
 
 ECHO_PROTOCOL = "https://layr8.test/echo/1.0"
@@ -38,8 +40,16 @@ async def run_receiver(
         reply = {"received": body, "from": client.did}
         if msg.type == PING_TYPE:
             reply["intercepted"] = True
+
+        if msg.type == ECHO_TYPE:
+            reply_type = ECHO_RESPONSE_TYPE
+        elif msg.type == PING_TYPE:
+            reply_type = PING_RESPONSE_TYPE
+        else:
+            reply_type = WILDCARD_RESPONSE_TYPE
+
         return Message(
-            type=WILDCARD_RESPONSE_TYPE,
+            type=reply_type,
             body=reply,
         )
 
