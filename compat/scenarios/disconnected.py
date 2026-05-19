@@ -14,8 +14,8 @@ from layr8 import Client, Config, Message, log_errors
 
 from .types import ScenarioContext, SenderContext, ScenarioResult, elapsed_ms
 
-DISCONNECTED_TYPE = "https://layr8.test/disconnected/1.0/request"
-DISCONNECTED_PROTOCOL = "https://layr8.test/disconnected/1.0"
+ECHO_TYPE = "https://layr8.test/echo/1.0/request"
+ECHO_PROTOCOL = "https://layr8.test/echo/1.0"
 
 
 async def run_receiver(
@@ -28,10 +28,18 @@ async def run_receiver(
             node_url=ctx.node_url,
             api_key=ctx.api_key,
             agent_did=ctx.agent_did,
-            protocols=[DISCONNECTED_PROTOCOL],
+            protocols=[ECHO_PROTOCOL],
         ),
         log_errors(),
     )
+
+    @client.handle(ECHO_TYPE)
+    async def handler(msg: Message) -> Message:
+        body = msg.unmarshal_body()
+        return Message(
+            type="https://layr8.test/echo/1.0/response",
+            body={"echo": body, "from": client.did},
+        )
 
     async with client:
         if on_ready:
@@ -46,7 +54,7 @@ async def run_sender(ctx: SenderContext) -> ScenarioResult:
             node_url=ctx.node_url,
             api_key=ctx.api_key,
             agent_did=ctx.agent_did,
-            protocols=[DISCONNECTED_PROTOCOL],
+            protocols=[ECHO_PROTOCOL],
         ),
         log_errors(),
     )
@@ -57,7 +65,7 @@ async def run_sender(ctx: SenderContext) -> ScenarioResult:
             try:
                 await client.request(
                     Message(
-                        type=DISCONNECTED_TYPE,
+                        type=ECHO_TYPE,
                         to=[ctx.receiver_did],
                         body={"test_id": ctx.test_id},
                     ),
