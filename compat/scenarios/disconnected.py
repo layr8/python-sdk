@@ -22,7 +22,7 @@ async def run_receiver(
     ctx: ScenarioContext,
     on_ready: Callable[[str], None] | None = None,
 ) -> None:
-    """Connect to the cloud-node and wait until killed."""
+    """Connect to the cloud-node, signal ready, then disconnect."""
     client = Client(
         Config(
             node_url=ctx.node_url,
@@ -32,19 +32,10 @@ async def run_receiver(
         ),
         log_errors(),
     )
-
-    @client.handle(ECHO_TYPE)
-    async def handler(msg: Message) -> Message:
-        body = msg.unmarshal_body()
-        return Message(
-            type="https://layr8.test/echo/1.0/response",
-            body={"echo": body, "from": client.did},
-        )
-
     async with client:
         if on_ready:
             on_ready(client.did)
-        await asyncio.Event().wait()
+        # Exiting the async with block closes the client immediately
 
 
 async def run_sender(ctx: SenderContext) -> ScenarioResult:

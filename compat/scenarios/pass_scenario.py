@@ -1,7 +1,6 @@
 """Pass scenario — handler returns PASS sentinel.
 
-Tests that when a handler returns PASS, the cloud-node's built-in
-trust-ping handler takes over and sends a ping-response.
+Tests that when a handler returns PASS, no response is sent and the sender times out.
 """
 
 from __future__ import annotations
@@ -14,9 +13,8 @@ from layr8 import Client, Config, Message, PASS, log_errors
 
 from .types import ScenarioContext, SenderContext, ScenarioResult, elapsed_ms
 
-PING_TYPE = "https://didcomm.org/trust-ping/2.0/ping"
-PING_RESPONSE_TYPE = "https://didcomm.org/trust-ping/2.0/ping-response"
-TRUST_PING_PROTOCOL = "https://didcomm.org/trust-ping/2.0"
+ECHO_TYPE = "https://layr8.test/echo/1.0/request"
+ECHO_PROTOCOL = "https://layr8.test/echo/1.0"
 
 
 async def run_receiver(
@@ -25,11 +23,16 @@ async def run_receiver(
 ) -> None:
     """Connect and register a handler that returns PASS. Blocks until cancelled."""
     client = Client(
-        Config(node_url=ctx.node_url, api_key=ctx.api_key, agent_did=ctx.agent_did),
+        Config(
+            node_url=ctx.node_url,
+            api_key=ctx.api_key,
+            agent_did=ctx.agent_did,
+            protocols=[ECHO_PROTOCOL],
+        ),
         log_errors(),
     )
 
-    @client.handle(PING_TYPE)
+    @client.handle(ECHO_TYPE)
     async def handler(msg: Message) -> Message | None:
         return PASS  # type: ignore[return-value]
 
@@ -40,34 +43,40 @@ async def run_receiver(
 
 
 async def run_sender(ctx: SenderContext) -> ScenarioResult:
-    """Send a trust-ping and verify the cloud-node responds with ping-response."""
+    """Send an echo request and expect a timeout because the receiver returns PASS."""
     client = Client(
         Config(
             node_url=ctx.node_url,
             api_key=ctx.api_key,
             agent_did=ctx.agent_did,
-            protocols=[TRUST_PING_PROTOCOL],
+            protocols=[ECHO_PROTOCOL],
         ),
         log_errors(),
     )
-    start = time.monotonic()
 
+    @client.handle(ECHO_TYPE)
+    async def dummy_handler(msg: Message) -> Message | None:
+        return None
+
+    start = time.monotonic()
     try:
         async with client:
             try:
                 await client.request(
                     Message(
-                        type=PING_TYPE,
+                        type=ECHO_TYPE,
                         to=[ctx.receiver_did],
-                        body={"responseRequested": True},
+                        body={"ping": ctx.test_id},
                     ),
                     timeout=ctx.timeout,
                 )
-                return ScenarioResult("pass", "pass", elapsed_ms(start))
-            except asyncio.TimeoutError:
                 return ScenarioResult(
-                    "fail", "pass", elapsed_ms(start),
-                    error="expected ping-response but got timeout",
+                    "fail",
+                    "pass",
+                    elapsed_ms(start),
+                    error="expected timeout but received a response",
                 )
+            except asyncio.TimeoutError:
+                return ScenarioResult("pass", "pass", elapsed_ms(start))
     except Exception as e:
         return ScenarioResult("fail", "pass", elapsed_ms(start), error=str(e))
