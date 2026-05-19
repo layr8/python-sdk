@@ -13,6 +13,10 @@ from scenarios.echo import ECHO_TYPE, ECHO_RESPONSE_TYPE, run_receiver, run_send
 from scenarios.types import ScenarioContext, SenderContext
 
 
+PING_TYPE = "https://didcomm.org/trust-ping/2.0/ping"
+PING_RESPONSE_TYPE = "https://didcomm.org/trust-ping/2.0/ping-response"
+
+
 class MockPhoenixServer:
     """Minimal Phoenix Channel V2 mock server for compat scenario tests."""
 
@@ -23,6 +27,7 @@ class MockPhoenixServer:
         self.port = 0
         self._assigned_dids: dict[int, str] = {}
         self._did_counter = 0
+        self._pending_dispatches: dict[str, dict[str, Any]] = {}
 
     async def start(self) -> None:
         self._server = await websockets.asyncio.server.serve(
@@ -66,20 +71,73 @@ class MockPhoenixServer:
                             None, ref, topic, "phx_reply",
                             {"status": "ok", "response": {}},
                         ]))
-                    # Route message to all OTHER connections (simulates cloud-node relay)
+                    sender_did = self._assigned_dids.get(conn_id, "")
+                    msg_id = payload.get("id", "") if isinstance(payload, dict) else ""
+                    # Route message to all OTHER connections
                     for other_ws in self._connections:
                         if other_ws is not ws and other_ws.state.name == "OPEN":
+                            recipient_did = self._assigned_dids.get(id(other_ws), "")
+                            # Track for trust-ping fallback
+                            if msg_id:
+                                self._pending_dispatches[f"{recipient_did}:{msg_id}"] = {
+                                    "sender_did": sender_did,
+                                    "plaintext": payload,
+                                }
                             await other_ws.send(json.dumps([
                                 None, None, topic, "message",
                                 {
                                     "context": {
-                                        "recipient": self._assigned_dids.get(id(other_ws), ""),
+                                        "recipient": recipient_did,
                                         "authorized": True,
                                         "sender_credentials": [],
                                     },
                                     "plaintext": payload,
                                 },
                             ]))
+                elif event == "dispatch_reply":
+                    if ref:
+                        await ws.send(json.dumps([
+                            None, ref, topic, "phx_reply",
+                            {"status": "ok", "response": {}},
+                        ]))
+                    # Trust-ping fallback on PASS
+                    status = payload.get("status", "") if isinstance(payload, dict) else ""
+                    message_id = payload.get("message_id", "") if isinstance(payload, dict) else ""
+                    recipient_did = self._assigned_dids.get(conn_id, "")
+                    key = f"{recipient_did}:{message_id}"
+                    pending = self._pending_dispatches.pop(key, None)
+                    if status == "pass" and pending:
+                        pt = pending["plaintext"]
+                        if isinstance(pt, dict) and pt.get("type") == PING_TYPE:
+                            body = pt.get("body", {})
+                            if isinstance(body, dict) and body.get("responseRequested"):
+                                sender = next(
+                                    (c for c in self._connections
+                                     if self._assigned_dids.get(id(c)) == pending["sender_did"]
+                                     and c.state.name == "OPEN"),
+                                    None,
+                                )
+                                if sender:
+                                    thid = pt.get("thid") or pt.get("id", "")
+                                    sender_topic = f"plugins:{pending['sender_did']}"
+                                    await sender.send(json.dumps([
+                                        None, None, sender_topic, "message",
+                                        {
+                                            "context": {
+                                                "recipient": pending["sender_did"],
+                                                "authorized": True,
+                                                "sender_credentials": [],
+                                            },
+                                            "plaintext": {
+                                                "id": f"mock-{message_id}",
+                                                "type": PING_RESPONSE_TYPE,
+                                                "from": recipient_did,
+                                                "to": [pending["sender_did"]],
+                                                "thid": thid,
+                                                "body": {},
+                                            },
+                                        },
+                                    ]))
                 else:
                     if ref:
                         await ws.send(json.dumps([
