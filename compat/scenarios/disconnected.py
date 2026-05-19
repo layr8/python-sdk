@@ -49,10 +49,9 @@ async def run_sender(ctx: SenderContext) -> ScenarioResult:
         ),
         log_errors(),
     )
-    start = time.monotonic()
-
     try:
         async with client:
+            start = time.monotonic()
             try:
                 await client.request(
                     Message(

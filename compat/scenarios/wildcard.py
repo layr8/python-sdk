@@ -70,10 +70,9 @@ async def run_sender(ctx: SenderContext) -> ScenarioResult:
         ),
         log_errors(),
     )
-    start = time.monotonic()
-
     try:
         async with client:
+            start = time.monotonic()
             # 1. Send echo request — proves catch-all handles custom protocols.
             resp = await client.request(
                 Message(
