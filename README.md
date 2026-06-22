@@ -222,10 +222,10 @@ Configuration can be set explicitly or via environment variables. Environment va
 |---|---|---|---|
 | `node_url` | `LAYR8_NODE_URL` | Yes | WebSocket URL of the cloud-node |
 | `api_key` | `LAYR8_API_KEY` | Yes | API key for authentication |
-| `agent_did` | `LAYR8_AGENT_DID` | No | Agent DID identity |
+| `agent_did` | `LAYR8_AGENT_DID` | Yes | Agent DID identity |
 | `protocols` | — | No | Additional protocol URIs to advertise on join |
 
-If `agent_did` is not provided, the cloud-node creates an ephemeral DID on connect. Retrieve it with `client.did`.
+`agent_did` is required — set it explicitly or via `LAYR8_AGENT_DID`. It's the DID your agent connects as and the address other agents use to message it; the cloud-node rejects a connection that doesn't specify one. Retrieve the active DID at runtime with `client.did`.
 
 ```python
 # Explicit configuration
@@ -242,18 +242,19 @@ client = Client(Config(), log_errors())
 
 ## Connection Lifecycle
 
-### DID Assignment
+### Agent DID
 
-If no `agent_did` is configured, the cloud-node assigns an ephemeral DID on connect:
+Your agent's DID is its identity on the network — the address other agents use to reach it. Configure it via `agent_did` (or the `LAYR8_AGENT_DID` env var); connecting without one is rejected by the cloud-node. Read the active DID back at runtime with `client.did`:
 
 ```python
 client = Client(Config(
     node_url="ws://localhost:4000/plugin_socket/websocket",
     api_key="my-key",
+    agent_did="did:web:myorg:my-agent",
 ), log_errors())
 await client.connect()
 
-print(client.did)  # "did:web:myorg:abc123" (assigned by node)
+print(client.did)  # "did:web:myorg:my-agent"
 ```
 
 ### Connection Resilience
