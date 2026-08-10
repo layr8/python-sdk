@@ -103,6 +103,14 @@ class Client:
         # read is the slower. Agents that emit a sequence without awaiting each
         # call are entitled to their order, and a public SDK does not get to
         # change that quietly.
+        #
+        # It covers the grant read and the marshal, and deliberately NOT the
+        # send itself. `PhoenixChannel.send` waits up to 15s for the server's
+        # ack; holding the lock across that made one slow ack block every other
+        # send and every handler reply behind it — head-of-line blocking this
+        # client never had. The read is the only new suspension point and so the
+        # only thing that can reorder; once it is done the write follows in the
+        # same task step, because releasing an asyncio lock does not yield.
         self._write_lock = asyncio.Lock()
         # MCP protocol bases already subscribed via mcp() (idempotency guard)
         self._mcp_bases: set[str] = set()
@@ -550,21 +558,24 @@ class Client:
         if not msg.from_:
             msg.from_ = self._agent_did
 
+    async def _marshal_ordered(self, msg: Message) -> dict[str, Any]:
+        """Attach grants and marshal, in call order. See ``_write_lock``."""
+        async with self._write_lock:
+            return marshal_didcomm(await self._with_grants(msg))
+
     async def _send_message(self, msg: Message) -> None:
         """Serialize and send a DIDComm message via the channel (fire-and-forget)."""
         if not self._channel:
             raise NotConnectedError()
-        async with self._write_lock:
-            data = marshal_didcomm(await self._with_grants(msg))
-            await self._channel.send_fire_and_forget("message", data)
+        data = await self._marshal_ordered(msg)
+        await self._channel.send_fire_and_forget("message", data)
 
     async def _send_message_acked(self, msg: Message) -> None:
         """Send a message and wait for server ack."""
         if not self._channel:
             raise NotConnectedError()
-        async with self._write_lock:
-            data = marshal_didcomm(await self._with_grants(msg))
-            reply = await self._channel.send("message", data)
+        data = await self._marshal_ordered(msg)
+        reply = await self._channel.send("message", data)
         if reply.status == "error":
             raise ServerRejectError(reply.reason or reply.status)
 
@@ -572,9 +583,8 @@ class Client:
         """Send a message without waiting for server ack."""
         if not self._channel:
             raise NotConnectedError()
-        async with self._write_lock:
-            data = marshal_didcomm(await self._with_grants(msg))
-            await self._channel.send_fire_and_forget("message", data)
+        data = await self._marshal_ordered(msg)
+        await self._channel.send_fire_and_forget("message", data)
 
     # ------------------------------------------------------------------
     # Verifiable Grant attachment

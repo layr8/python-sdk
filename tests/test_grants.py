@@ -418,3 +418,46 @@ class TestGrantMiss:
             await client.close()
 
         assert sent_messages(mock_server)
+
+
+class TestWriteOrdering:
+    async def test_a_slow_server_ack_does_not_block_the_next_send(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        # The grant read is serialized to keep sends in call order, but the lock
+        # must NOT cover the channel write: `PhoenixChannel.send` waits up to 15s
+        # for the server's ack, and holding the lock across that would give this
+        # client head-of-line blocking it never had — one slow ack stalling every
+        # other send and every handler reply behind it.
+        def join_only(msg: dict[str, Any]) -> None:
+            if msg["event"] == "phx_join":
+                asyncio.ensure_future(
+                    mock_server.send_to_client(
+                        msg["ref"], msg["ref"], msg["topic"], "phx_reply",
+                        {"status": "ok", "response": {"did": "did:web:alice.localhost"}},
+                    )
+                )
+            # Every other event is left unanswered: a node that took the message
+            # and never acked it.
+
+        mock_server.on_msg = join_only
+        client, _ = make_client(mock_server, records=[grant_record(scope=COVERING)])
+
+        await client.connect()
+        try:
+            first = asyncio.ensure_future(client.send(a_message(body={"n": 1})))
+            second = asyncio.ensure_future(client.send(a_message(body={"n": 2})))
+
+            # Neither can finish (no ack is coming), but both frames must be on
+            # the wire well inside the 15s ack timeout.
+            await asyncio.sleep(0.5)
+            assert [p["body"]["n"] for p in sent_messages(mock_server)] == [1, 2]
+
+            for task in (first, second):
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        finally:
+            await client.close()

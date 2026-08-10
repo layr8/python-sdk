@@ -1,8 +1,7 @@
 """Tests for layr8.space_watch — the poll/diff/debounce contract.
 
-Behavioural contract shared with `@layr8/sdk`'s SpaceWatcher and the `layr8`
-hex package's Layr8.SpaceWatcher: `contracts/sdk-space-watch.md`. These are the
-boundary tests for the Python side of it.
+These pin the behaviour every Layr8 SDK's watcher shares, so the Python side
+cannot drift from it silently.
 """
 
 from __future__ import annotations

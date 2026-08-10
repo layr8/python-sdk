@@ -135,7 +135,7 @@ def select_one(scope: list[dict[str, Any]], recipient: str, type_uri: str) -> li
 
 
 class TestScopeMatching:
-    """select_for mirrors helix's structure_v2.rego."""
+    """select_for mirrors the node's authorization policy."""
 
     def test_wildcard_protocol_and_message_type_cover_anything(self) -> None:
         assert select_one(

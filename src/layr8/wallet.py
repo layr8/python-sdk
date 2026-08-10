@@ -11,13 +11,13 @@ connected directly, on any protocol, sent nothing and was denied with "no grant
 covers this call": a message that reads as "your grant is misconfigured" when
 the truth is "no credential was ever put on the wire".
 
-That misreading is the expensive part. Two teams spent days on it — checking the
-grant, the Space policy, whether the PDP expanded ``messageTypes: ["*"]``. The
-sender is the only party that knows it attached nothing, so the sender is the
-only one that can say so: see ``Config.on_grant_miss``.
+That misreading is the expensive part: the denial names a grant, so it sends you
+to check a grant that is fine. The sender is the only party that knows it
+attached nothing, so the sender is the only one that can say so — see
+``Config.on_grant_miss``.
 
-Cross-language contract: ``contracts/sender-cn-vg-attachment.md``. The Node
-SDK's ``src/wallet.ts`` is the same abstraction.
+Every Layr8 SDK implements this the same way, so an agent behaves identically
+whatever language it is written in.
 
 The attachment shape is load-bearing
 ------------------------------------
@@ -27,7 +27,7 @@ keeps attachments whose media type is exactly ``"application/vc+jwt"`` and drops
 every other one SILENTLY, before looking at the data at all. A Verifiable
 Presentation (``application/vp+jwt``) is discarded on that rule, and the denial
 that follows is byte-for-byte the one you get for attaching nothing — which is
-how a partner team spent a day looking at a grant that was fine.
+why the mistake is expensive to find.
 
 ``data.jws`` is the primary place the JWS is read from, and what this SDK
 writes. ``data.base64`` is NOT dropped: the extractor falls back to it and
@@ -38,21 +38,21 @@ reason is "primary path", not "the alternative is discarded".
 Over-attaching is free; under-attaching is not
 ----------------------------------------------
 
-``grant.rego`` allows on the FIRST passing grant and simply ignores the rest, so
+The node's policy allows on the FIRST passing grant and simply ignores the rest, so
 an extra credential on the wire costs nothing. A credential withheld costs a
 working call, and the failure is invisible — it presents as the same "no grant
 covers this call" this module exists to end.
 
 That asymmetry decides every judgement call here. Nothing filters on the grant's
-``credentialSubject.grant.tools`` allowlist: no policy reads it — helix
-evaluates ``credentialSubject.constraints.rego`` keyed by grant id, which this
-side cannot reproduce and should not try to. ``tools`` only ranks candidates
-when the cap bites.
+``credentialSubject.grant.tools`` allowlist: it is not a policy input anywhere.
+The node evaluates ``credentialSubject.constraints.rego`` keyed by grant id,
+which this side cannot reproduce and should not try to. ``tools`` only ranks
+candidates when the cap bites.
 
 Selection mirrors the policy, and deliberately errs wide
 --------------------------------------------------------
 
-:func:`_covers` mirrors helix's ``structure_v2.rego``: some scope entry must
+:func:`_covers` mirrors the node's authorization policy: some scope entry must
 match the protocol, the message type and the resource. What this does NOT do is
 decide anything the PDP decides — revocation and validity windows are checked
 there, against sources this side cannot see. Attaching a revoked or expired
@@ -133,7 +133,7 @@ def tool_name_of(body: Any) -> str | None:
     return name if isinstance(name, str) else None
 
 
-# ── structure_v2.rego mirror ──
+# ── policy mirror ──
 
 
 def _protocol_matches(scope_protocol: Any, want: str) -> bool:
@@ -147,7 +147,7 @@ def _message_type_matches(types: Any, want: str) -> bool:
 def _resource_matches(resource: Any, want: str) -> bool:
     """The three ways a scope's ``resource`` can cover a message's.
 
-    In the order ``structure_v2.rego``'s ``_resource_ok`` states them:
+    In the order the policy states them:
 
     1. equal;
     2. ``foo/*`` covers anything under ``foo/`` — note the rego strips only the
