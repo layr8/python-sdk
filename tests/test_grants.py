@@ -1,0 +1,420 @@
+"""Client-level Verifiable Grant attachment: what actually reaches the wire.
+
+The mock Phoenix server and the stub node cannot share a port (the REST base is
+derived from the WebSocket URL), so the wallet is built over a stub reader and
+installed on the client. Everything downstream of that — selection, the
+attachment shape, the marshalled envelope, the unattached/denial correlation —
+is the real code path. The REST shape itself is checked against a real HTTP
+server in ``test_wallet.py``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any
+
+from layr8 import Attachment, AttachmentData, Client, Config, GrantMissInfo, Message, SDKError
+from layr8.wallet import Wallet
+
+from .test_client import MockPhoenixServer, mock_server, ws_url  # noqa: F401
+from .test_wallet import grant_record
+
+
+def _discard_errors(err: SDKError) -> None:
+    pass
+
+
+def make_client(
+    server: MockPhoenixServer,
+    *,
+    records: list[dict[str, Any]] | Exception | None = None,
+    on_grant_miss: Any = None,
+    attach_grants: bool = True,
+) -> tuple[Client, dict[str, int]]:
+    """A client whose wallet reads *records* instead of talking to a node."""
+    calls = {"reads": 0}
+
+    async def reader(_did: str) -> list[dict[str, Any]]:
+        calls["reads"] += 1
+        if isinstance(records, Exception):
+            raise records
+        return records or []
+
+    client = Client(
+        Config(
+            node_url=ws_url(server),
+            api_key="test-api-key",
+            agent_did="did:web:alice.localhost",
+            attach_grants=attach_grants,
+            on_grant_miss=on_grant_miss,
+        ),
+        _discard_errors,
+    )
+    if attach_grants:
+        client._wallet = Wallet(reader)
+    return client, calls
+
+
+def sent_messages(server: MockPhoenixServer) -> list[dict[str, Any]]:
+    return [r["payload"] for r in server.get_received() if r["event"] == "message"]
+
+
+COVERING = [{"protocol": "*", "messageTypes": ["*"]}]
+
+
+def a_message(**kwargs: Any) -> Message:
+    defaults: dict[str, Any] = {
+        "type": "https://layr8.io/protocols/mcp/1.0/tools-call",
+        "to": ["did:web:bob.localhost"],
+        "body": {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "send"}},
+    }
+    return Message(**{**defaults, **kwargs})
+
+
+class TestAttachmentOnTheWire:
+    async def test_a_covering_grant_rides_out_as_application_vc_jwt(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        rec = grant_record(scope=COVERING)
+        client, _ = make_client(mock_server, records=[rec])
+
+        await client.connect()
+        try:
+            await client.send(a_message())
+        finally:
+            await client.close()
+
+        (payload,) = sent_messages(mock_server)
+        (att,) = payload["attachments"]
+        # media_type is the ONLY field the node's extractor filters on, by exact
+        # string equality; anything else is dropped silently and denied
+        # identically to attaching nothing.
+        assert att["media_type"] == "application/vc+jwt"
+        assert att["data"] == {"jws": rec["credential_jwt"]}
+
+    async def test_nothing_covering_means_no_attachments_and_the_send_still_happens(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        client, _ = make_client(mock_server, records=[])
+
+        await client.connect()
+        try:
+            await client.send(a_message())
+        finally:
+            await client.close()
+
+        (payload,) = sent_messages(mock_server)
+        assert "attachments" not in payload
+
+    async def test_caller_supplied_attachments_are_never_displaced(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        # Someone passing their own has a reason, and silently overriding it
+        # would be the second confusing thing to happen to that message.
+        client, calls = make_client(mock_server, records=[grant_record(scope=COVERING)])
+        mine = Attachment(
+            id="mine", media_type="application/vc+jwt", data=AttachmentData(jws="caller.jwt.x")
+        )
+
+        await client.connect()
+        try:
+            await client.send(a_message(attachments=[mine]))
+        finally:
+            await client.close()
+
+        (payload,) = sent_messages(mock_server)
+        assert [a["id"] for a in payload["attachments"]] == ["mine"]
+        assert calls["reads"] == 0
+
+    async def test_attach_grants_false_reads_nothing_at_all(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        client, calls = make_client(mock_server, attach_grants=False)
+
+        await client.connect()
+        try:
+            await client.send(a_message())
+        finally:
+            await client.close()
+
+        assert client._wallet is None
+        assert calls["reads"] == 0
+
+    async def test_a_request_carries_its_grants_too(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        rec = grant_record(scope=COVERING)
+        client, _ = make_client(mock_server, records=[rec])
+
+        await client.connect()
+        try:
+            task = asyncio.ensure_future(client.request(a_message(), timeout=2.0))
+            await asyncio.sleep(0.05)
+            (payload,) = sent_messages(mock_server)
+            assert payload["attachments"][0]["media_type"] == "application/vc+jwt"
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        finally:
+            await client.close()
+
+    async def test_a_handler_reply_carries_its_grants_too(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        # A reply is a message the node authorizes exactly like the request that
+        # prompted it.
+        rec = grant_record(scope=COVERING)
+        client, _ = make_client(mock_server, records=[rec])
+
+        @client.handle("https://layr8.io/protocols/echo/1.0/request")
+        async def echo(msg: Message) -> Message:
+            return Message(
+                type="https://layr8.io/protocols/echo/1.0/response", body={"text": "pong"}
+            )
+
+        await client.connect()
+        try:
+            mock_server.clear_received()
+            await mock_server.send_to_client(
+                None,
+                None,
+                "plugin:did:web:alice.localhost",
+                "message",
+                {
+                    "plaintext": {
+                        "id": "inbound-1",
+                        "type": "https://layr8.io/protocols/echo/1.0/request",
+                        "from": "did:web:bob.localhost",
+                        "to": ["did:web:alice.localhost"],
+                        "body": {"text": "ping"},
+                    }
+                },
+            )
+            await asyncio.sleep(0.2)
+
+            replies = sent_messages(mock_server)
+            assert replies, "handler reply never reached the wire"
+            assert replies[0]["attachments"][0]["media_type"] == "application/vc+jwt"
+        finally:
+            await client.close()
+
+    async def test_the_grants_are_read_once_and_cached_across_sends(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        client, calls = make_client(mock_server, records=[grant_record(scope=COVERING)])
+
+        await client.connect()
+        try:
+            await client.send(a_message())
+            await client.send(a_message())
+            assert calls["reads"] == 1
+
+            # A grant minted seconds ago is invisible until the TTL lapses; an
+            # agent that has just been told it was granted something should not
+            # have to wait out a timer it cannot see.
+            client.refresh_grants()
+            await client.send(a_message())
+            assert calls["reads"] == 2
+        finally:
+            await client.close()
+
+    async def test_sends_keep_their_call_order_despite_the_grant_read(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        # The read puts an await in front of every send. Agents that emit a
+        # sequence without awaiting each call are entitled to their order.
+        client, _ = make_client(mock_server, records=[grant_record(scope=COVERING)])
+
+        await client.connect()
+        try:
+            first = asyncio.ensure_future(client.send(a_message(body={"n": 1})))
+            second = asyncio.ensure_future(client.send(a_message(body={"n": 2})))
+            await asyncio.gather(first, second)
+
+            assert [p["body"]["n"] for p in sent_messages(mock_server)] == [1, 2]
+        finally:
+            await client.close()
+
+
+class TestGrantMiss:
+    async def test_a_read_failure_is_announced_and_does_not_block_the_message(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        # The node is the authority on whether this message needed a grant, and
+        # most traffic needs none; refusing here on a transient failure would
+        # take down calls that were never going to need us.
+        misses: list[GrantMissInfo] = []
+        client, _ = make_client(
+            mock_server, records=RuntimeError("unauthorized"), on_grant_miss=misses.append
+        )
+
+        await client.connect()
+        try:
+            await client.send(a_message())
+        finally:
+            await client.close()
+
+        assert sent_messages(mock_server), "the send was blocked by a wallet failure"
+        assert len(misses) == 1
+        assert isinstance(misses[0].error, RuntimeError)
+        assert misses[0].to == ["did:web:bob.localhost"]
+
+    async def test_the_cap_is_announced_at_once(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        # Unlike "nothing covered it", this is never the normal shape of a
+        # message that needs no grant, and it will recur on every send until
+        # someone prunes the wallet.
+        misses: list[GrantMissInfo] = []
+        records = [
+            grant_record(scope=COVERING, cred_id=f"urn:uuid:g{i}", sig=f"s{i}")
+            for i in range(20)
+        ]
+        client, _ = make_client(mock_server, records=records, on_grant_miss=misses.append)
+
+        await client.connect()
+        try:
+            await client.send(a_message())
+        finally:
+            await client.close()
+
+        assert [m.capped for m in misses] == [{"covering": 20, "attached": 16}]
+
+    async def test_an_unattached_message_alone_says_nothing(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        # Discovery, trust-ping and problem reports legitimately need no grant.
+        # A diagnostic that fires on every one of them is one nobody reads when
+        # it matters.
+        misses: list[GrantMissInfo] = []
+        client, _ = make_client(mock_server, records=[], on_grant_miss=misses.append)
+
+        await client.connect()
+        try:
+            for _ in range(5):
+                await client.send(a_message())
+        finally:
+            await client.close()
+
+        assert misses == []
+
+    async def test_a_denial_for_an_unattached_message_is_the_case_it_exists_for(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        misses: list[GrantMissInfo] = []
+        client, _ = make_client(mock_server, records=[], on_grant_miss=misses.append)
+
+        await client.connect()
+        try:
+            await client.send(a_message(thread_id="thread-42"))
+
+            # The node's own denial sets `pthid` — to the denied message's
+            # `thid` — and sets no `thid` at all, which is why the pthid lookup
+            # is the one that matches in production.
+            await mock_server.send_to_client(
+                None,
+                None,
+                "plugin:did:web:alice.localhost",
+                "message",
+                {
+                    "plaintext": {
+                        "id": "denial-1",
+                        "type": "https://didcomm.org/report-problem/2.0/problem-report",
+                        "from": "did:web:bob.localhost",
+                        "pthid": "thread-42",
+                        "body": {
+                            "code": "e.m.authz.denied",
+                            "comment": "no grant covers this call",
+                        },
+                    }
+                },
+            )
+            await asyncio.sleep(0.15)
+        finally:
+            await client.close()
+
+        assert len(misses) == 1
+        assert misses[0].denial_code == "e.m.authz.denied"
+        assert misses[0].type == "https://layr8.io/protocols/mcp/1.0/tools-call"
+        assert misses[0].to == ["did:web:bob.localhost"]
+
+    async def test_a_denial_for_a_message_that_DID_carry_a_grant_says_nothing(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        misses: list[GrantMissInfo] = []
+        client, _ = make_client(
+            mock_server, records=[grant_record(scope=COVERING)], on_grant_miss=misses.append
+        )
+
+        await client.connect()
+        try:
+            await client.send(a_message(thread_id="thread-7"))
+            await mock_server.send_to_client(
+                None,
+                None,
+                "plugin:did:web:alice.localhost",
+                "message",
+                {
+                    "plaintext": {
+                        "id": "denial-2",
+                        "type": "https://didcomm.org/report-problem/2.0/problem-report",
+                        "pthid": "thread-7",
+                        "body": {"code": "e.m.authz.denied"},
+                    }
+                },
+            )
+            await asyncio.sleep(0.15)
+        finally:
+            await client.close()
+
+        assert misses == []
+
+    async def test_a_non_authz_problem_report_is_not_a_grant_miss(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        misses: list[GrantMissInfo] = []
+        client, _ = make_client(mock_server, records=[], on_grant_miss=misses.append)
+
+        await client.connect()
+        try:
+            await client.send(a_message(thread_id="thread-9"))
+            await mock_server.send_to_client(
+                None,
+                None,
+                "plugin:did:web:alice.localhost",
+                "message",
+                {
+                    "plaintext": {
+                        "id": "problem-1",
+                        "type": "https://didcomm.org/report-problem/2.0/problem-report",
+                        "pthid": "thread-9",
+                        "body": {"code": "e.p.xfer.cant-process"},
+                    }
+                },
+            )
+            await asyncio.sleep(0.15)
+        finally:
+            await client.close()
+
+        assert misses == []
+
+    async def test_a_raising_callback_does_not_break_the_send(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        def explode(_info: GrantMissInfo) -> None:
+            raise RuntimeError("bad callback")
+
+        client, _ = make_client(
+            mock_server, records=RuntimeError("unauthorized"), on_grant_miss=explode
+        )
+
+        await client.connect()
+        try:
+            await client.send(a_message())
+        finally:
+            await client.close()
+
+        assert sent_messages(mock_server)

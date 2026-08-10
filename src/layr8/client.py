@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote as url_quote
 
 from .channel import PhoenixChannel
-from .config import Config, resolve_config
+from .config import Config, GrantMissInfo, resolve_config
 from .credentials import Credential, StoredCredential, VerifiedCredential
 from .errors import (
     AlreadyConnectedError,
@@ -22,10 +23,22 @@ from .errors import (
     ServerRejectError,
 )
 from .handler import HandlerEntry, HandlerFn, HandlerRegistry
+from .mcp import DEFAULT_MCP_BASE, McpBinding
 from .message import Message, generate_id, marshal_didcomm, parse_didcomm
 from .sentinel import _Pass
 from .presentations import VerifiedPresentation
 from .rest import RestClient, rest_url_from_websocket
+from .wallet import Wallet, rest_credential_reader
+
+_PROBLEM_REPORT_TYPE = "https://didcomm.org/report-problem/2.0/problem-report"
+
+#: How long a message sent with nothing attached is kept, waiting for a denial.
+#:
+#: The node evaluates before it delivers, so the denial follows its message by a
+#: round trip — one second would cover it. A minute is chosen to survive a paused
+#: process or a reconnect, and it is what bounds the map: see
+#: ``Client._remember_unattached``.
+_UNATTACHED_WINDOW_MS = 60_000
 
 
 class Client:
@@ -65,7 +78,34 @@ class Client:
 
         # REST client for credential / presentation APIs
         rest_url = rest_url_from_websocket(self._cfg.node_url)
-        self._rest = RestClient(rest_url, self._cfg.api_key)
+        self._rest = RestClient(rest_url, self._cfg.api_key, self._cfg.rest_timeout_ms)
+
+        # On by default. A grant the node requires and the SDK does not attach
+        # is indistinguishable, from the caller's side, from a grant that was
+        # never issued — and the denial names the grant, not the omission.
+        self._wallet: Wallet | None = (
+            Wallet(
+                rest_credential_reader(self._rest, self._cfg.grant_read_timeout_ms),
+                ttl_ms=self._cfg.grant_cache_ms,
+                read_timeout_ms=self._cfg.grant_read_timeout_ms,
+            )
+            if self._cfg.attach_grants
+            else None
+        )
+        self._on_grant_miss = config.on_grant_miss
+        # Messages that went out with nothing attached, keyed by thread, so a
+        # denial can be matched back to them. Bounded by AGE — a diagnostic, not
+        # a ledger. See _remember_unattached.
+        self._unattached: dict[str, tuple[float, list[str], str]] = {}
+        # Outbound writes happen in CALL order, whatever the wallet does: the
+        # grant read puts an await in front of every send, so without this two
+        # sends issued back to back could arrive reversed when the first one's
+        # read is the slower. Agents that emit a sequence without awaiting each
+        # call are entitled to their order, and a public SDK does not get to
+        # change that quietly.
+        self._write_lock = asyncio.Lock()
+        # MCP protocol bases already subscribed via mcp() (idempotency guard)
+        self._mcp_bases: set[str] = set()
 
         # Correlation map for Request/Response: thread_id → Future
         self._pending: dict[str, asyncio.Future[Message]] = {}
@@ -145,6 +185,53 @@ class Client:
             return handler
 
         return decorator
+
+    def mcp(self, base: str = DEFAULT_MCP_BASE) -> McpBinding:
+        """Set up MCP (Model Context Protocol) over DIDComm on a protocol *base*.
+
+        Returns a binding whose ``peer(did)`` yields a caller with
+        ``initialize()``, ``list_tools()`` and ``call_tool()``.
+
+        A peer's MCP surface is DIDComm request/reply: a request of type
+        ``{base}/<method>`` with a JSON-RPC body, answered by a
+        ``{base}/<method>-result`` message. The reply echoes the request's
+        ``thid``, so ``request()`` correlates it — this binding removes the
+        boilerplate.
+
+        Must be called BEFORE ``connect()`` (like ``handle()``): it registers
+        the protocol subscription the cloud-node needs in order to deliver
+        ``{base}/*`` replies. Idempotent per base.
+        """
+        if self._connected:
+            raise AlreadyConnectedError()
+        if self._closed:
+            raise ClientClosedError()
+
+        if base not in self._mcp_bases:
+            # A no-op handler whose type derives the `base` protocol subscribes
+            # the client to it (see HandlerRegistry.protocols). Correlated
+            # replies are consumed in _handle_inbound_message BEFORE handler
+            # lookup, so this handler only ever fires for an *uncorrelated*
+            # `{base}/…` message (none in normal request/reply use) — passing is
+            # the safe default.
+            async def _noop(_msg: Message) -> Any:
+                return _Pass()
+
+            self._registry.register(f"{base}/_mcp", _noop)
+            self._mcp_bases.add(base)
+
+        return McpBinding(self, base)
+
+    def refresh_grants(self, did: str | None = None) -> None:
+        """Forget the cached grants for *did* (default: this agent's).
+
+        The cache TTL is the whole freshness story: a grant minted seconds ago
+        is invisible until it lapses. An agent that has just been TOLD it was
+        granted something — by a request/approve flow, or by a person on the
+        other end of a chat — should not have to wait out a timer it cannot see.
+        """
+        if self._wallet is not None:
+            self._wallet.refresh(did or self._agent_did)
 
     async def connect(self) -> None:
         """Establish WebSocket connection and join the Phoenix Channel."""
@@ -283,6 +370,11 @@ class Client:
                 raw=payload,
             ))
             return
+
+        # Before routing, not after: a denial that resolves a pending request is
+        # handed to the waiter and never reaches a handler, and a denial with no
+        # waiter goes to one — _note_denial has to see both.
+        self._note_denial(msg)
 
         # Check if this is a response to a pending Request (by thread ID)
         if msg.thread_id and msg.thread_id in self._pending:
@@ -462,15 +554,17 @@ class Client:
         """Serialize and send a DIDComm message via the channel (fire-and-forget)."""
         if not self._channel:
             raise NotConnectedError()
-        data = marshal_didcomm(msg)
-        await self._channel.send_fire_and_forget("message", data)
+        async with self._write_lock:
+            data = marshal_didcomm(await self._with_grants(msg))
+            await self._channel.send_fire_and_forget("message", data)
 
     async def _send_message_acked(self, msg: Message) -> None:
         """Send a message and wait for server ack."""
         if not self._channel:
             raise NotConnectedError()
-        data = marshal_didcomm(msg)
-        reply = await self._channel.send("message", data)
+        async with self._write_lock:
+            data = marshal_didcomm(await self._with_grants(msg))
+            reply = await self._channel.send("message", data)
         if reply.status == "error":
             raise ServerRejectError(reply.reason or reply.status)
 
@@ -478,8 +572,149 @@ class Client:
         """Send a message without waiting for server ack."""
         if not self._channel:
             raise NotConnectedError()
-        data = marshal_didcomm(msg)
-        await self._channel.send_fire_and_forget("message", data)
+        async with self._write_lock:
+            data = marshal_didcomm(await self._with_grants(msg))
+            await self._channel.send_fire_and_forget("message", data)
+
+    # ------------------------------------------------------------------
+    # Verifiable Grant attachment
+    # ------------------------------------------------------------------
+
+    async def _with_grants(self, msg: Message) -> Message:
+        """Attach the Verifiable Grants that cover this message.
+
+        The node requires one for anything its policy does not allow outright,
+        and nothing in this SDK attached any — there was no enforcement on
+        outgoing requests because there was no mechanism. An agent connecting
+        directly sent nothing and was denied with "no grant covers this call": a
+        message that reads as "your grant is misconfigured" when the truth is
+        "no credential was ever put on the wire".
+
+        Caller-supplied attachments WIN and are never displaced — someone
+        passing their own has a reason, and silently overriding it would be the
+        second confusing thing to happen to that message.
+
+        A wallet failure does NOT block the send. The node is the authority on
+        whether this message needed a grant, and most traffic (discovery,
+        trust-ping, problem reports) needs none; refusing here on a transient
+        fetch error would take down calls that were never going to need us. The
+        send proceeds unattached and ``on_grant_miss`` says so.
+
+        "Does not block" has to hold for a read that HANGS, not just one that
+        fails fast — a hang is the commoner production failure. The bound is
+        ``Config.grant_read_timeout_ms``, enforced on the request itself, and a
+        lapsed deadline arrives here as an ordinary read error.
+        """
+        if self._wallet is None or msg.attachments:
+            return msg
+
+        try:
+            attachments = await self._wallet.attachments_for(
+                msg.from_,
+                recipients=msg.to or [],
+                type_uri=msg.type,
+                body=msg.body if msg.body is not None else msg._body_raw,
+                # The cap left credentials off. Announced at once rather than
+                # remembered for a denial: unlike "nothing covered it", this is
+                # never the normal shape of a message that needs no grant, and
+                # the holding that triggers it will trigger it on every send
+                # until someone prunes the wallet.
+                on_capped=lambda capped: self._notify_grant_miss(
+                    GrantMissInfo(to=msg.to or [], type=msg.type, capped=capped)
+                ),
+            )
+        except Exception as exc:
+            # A read failure IS announced immediately: unlike "nothing covered
+            # it", it is never normal, and it means every subsequent send is
+            # flying blind.
+            self._notify_grant_miss(
+                GrantMissInfo(to=msg.to or [], type=msg.type, error=exc)
+            )
+            return msg
+
+        if attachments:
+            msg.attachments = attachments
+            return msg
+
+        # Nothing covered it — remembered, not announced.
+        #
+        # Announcing here fired on every message that legitimately needs no
+        # grant: discovery, trust-ping, problem reports. For the majority of
+        # agents, which hold no grants at all, that is one callback per outbound
+        # message — and a diagnostic that fires constantly is one nobody reads
+        # when it matters. The signal actually wanted is "the node denied, and
+        # we had attached nothing", which needs the denial: see _note_denial.
+        self._remember_unattached(msg)
+        return msg
+
+    def _notify_grant_miss(self, info: GrantMissInfo) -> None:
+        if self._on_grant_miss is None:
+            return
+        try:
+            self._on_grant_miss(info)
+        except Exception as exc:
+            self._on_error(SDKError(kind=ErrorKind.HANDLER_EXCEPTION, cause=exc))
+
+    def _remember_unattached(self, msg: Message, now_ms: float | None = None) -> None:
+        """Record a message that went out unattached. Evicted by AGE, not count.
+
+        A count cap drops the entry that mattered. The denial for a message
+        arrives within seconds of it, but a cap counts every unattached message
+        in between — and this records EVERY message it attaches nothing to,
+        which for the agents this feature is aimed at (the ones holding no
+        grants at all) is every discovery, trust-ping and problem report they
+        send. Enough of those between the send and its denial and
+        ``on_grant_miss`` never fires: the one thing it exists for, lost to
+        traffic that never needed a grant.
+
+        Age bounds the map by SEND RATE × window instead, which is the honest
+        bound — the entries are small and the window is short.
+        """
+        now = now_ms if now_ms is not None else time.monotonic() * 1000
+
+        # Insertion order is chronological and `now` never goes backwards, so
+        # the stale entries are a prefix: stop at the first live one.
+        for key in list(self._unattached):
+            if now - self._unattached[key][0] < _UNATTACHED_WINDOW_MS:
+                break
+            del self._unattached[key]
+
+        key = msg.thread_id or msg.id
+        # Delete first: re-setting an existing key keeps its ORIGINAL position,
+        # and one hot thread id refreshed in place would sit at the front with a
+        # fresh timestamp and stop the prefix scan above from ever reaching the
+        # stale entries behind it.
+        self._unattached.pop(key, None)
+        self._unattached[key] = (now, msg.to or [], msg.type)
+
+    def _note_denial(self, msg: Message) -> None:
+        """A problem report came back.
+
+        If it is an authorization denial for a message we sent with nothing
+        attached, that is the one case ``on_grant_miss`` exists for: the node
+        names the grant it could not find, and only this side knows no
+        credential was ever on the wire.
+        """
+        if msg.type != _PROBLEM_REPORT_TYPE:
+            return
+
+        body = msg.unmarshal_body()
+        code = body.get("code", "") if isinstance(body, dict) else ""
+        if not isinstance(code, str) or "authz" not in code:
+            return
+
+        # `parent_thread_id` is the one that matches in production and it is
+        # SECOND only because a peer is free to use either. The node's own
+        # denial sets `pthid` — to the denied message's `thid` or, for a message
+        # sent without one, its `id` — and sets no `thid` at all.
+        for key in (msg.thread_id, msg.parent_thread_id):
+            hit = self._unattached.get(key) if key else None
+            if hit is not None:
+                del self._unattached[key]
+                self._notify_grant_miss(
+                    GrantMissInfo(to=hit[1], type=hit[2], denial_code=code)
+                )
+                return
 
     def _on_disconnect(self, err: Exception) -> None:
         """Internal disconnect handler that forwards to user callback."""

@@ -76,21 +76,40 @@ class RestClient:
     Handles JSON serialization, ``x-api-key`` auth, and error parsing.
     """
 
-    def __init__(self, base_url: str, api_key: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout_ms: float = 30_000,
+    ) -> None:
         self._base_url = base_url
         self._api_key = api_key
+        # Default deadline on every call made through this client. `0` leaves
+        # them unbounded, which a caller with a genuinely slow node can ask for
+        # — but it is now something asked for rather than something got by
+        # forgetting.
+        self._timeout_ms = timeout_ms
         self._session: aiohttp.ClientSession | None = None
+
+    def _timeout(self, timeout_ms: float | None) -> aiohttp.ClientTimeout:
+        ms = self._timeout_ms if timeout_ms is None else timeout_ms
+        return aiohttp.ClientTimeout(total=None if ms <= 0 else ms / 1000)
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             connector = aiohttp.TCPConnector(resolver=_LocalhostResolver())
-            self._session = aiohttp.ClientSession(
-                connector=connector,
-                timeout=aiohttp.ClientTimeout(total=30),
-            )
+            # The per-request timeout is what actually binds; the session-level
+            # one only covers a call that passes none.
+            self._session = aiohttp.ClientSession(connector=connector)
         return self._session
 
-    async def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    async def post(
+        self,
+        path: str,
+        body: dict[str, Any],
+        *,
+        timeout_ms: float | None = None,
+    ) -> dict[str, Any]:
         """Send a JSON POST request and return the decoded response."""
         session = self._get_session()
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -101,10 +120,16 @@ class RestClient:
             self._base_url + path,
             data=json.dumps(body),
             headers=headers,
+            timeout=self._timeout(timeout_ms),
         ) as resp:
             return await self._handle_response(resp)
 
-    async def get(self, path: str) -> dict[str, Any]:
+    async def get(
+        self,
+        path: str,
+        *,
+        timeout_ms: float | None = None,
+    ) -> dict[str, Any]:
         """Send a GET request and return the decoded response."""
         session = self._get_session()
         headers: dict[str, str] = {}
@@ -114,6 +139,7 @@ class RestClient:
         async with session.get(
             self._base_url + path,
             headers=headers,
+            timeout=self._timeout(timeout_ms),
         ) as resp:
             return await self._handle_response(resp)
 
