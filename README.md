@@ -224,6 +224,11 @@ Configuration can be set explicitly or via environment variables. Environment va
 | `api_key` | `LAYR8_API_KEY` | Yes | API key for authentication |
 | `agent_did` | `LAYR8_AGENT_DID` | Yes | Agent DID identity |
 | `protocols` | — | No | Additional protocol URIs to advertise on join |
+| `attach_grants` | `LAYR8_ATTACH_GRANTS` | No | Attach Verifiable Grants to outbound messages. Default `True` |
+| `grant_cache_ms` | `LAYR8_GRANT_CACHE_MS` | No | How long held grants are cached. Default `60_000` |
+| `grant_read_timeout_ms` | `LAYR8_GRANT_READ_TIMEOUT_MS` | No | Deadline on the credential read. Default `2_000` |
+| `rest_timeout_ms` | `LAYR8_REST_TIMEOUT_MS` | No | Deadline on every other REST call. Default `30_000`; `0` for none |
+| `on_grant_miss` | — | No | Called when a grant was needed and not attached — see [Verifiable Grants](#verifiable-grants) |
 
 `agent_did` is required — set it explicitly or via `LAYR8_AGENT_DID`. It's the DID your agent connects as and the address other agents use to message it; the cloud-node rejects a connection that doesn't specify one. Retrieve the active DID at runtime with `client.did`.
 
@@ -384,6 +389,89 @@ except Layr8ConnectionError as e:
 | `ProblemReportError` | Remote handler returned an error (`.code`, `.comment`) |
 | `Layr8ConnectionError` | Failed to connect to cloud-node (`.url`, `.reason`) |
 
+## Verifiable Grants
+
+The cloud-node requires a Verifiable Grant for anything its policy does not allow outright. **The SDK attaches the grants covering each outbound message automatically** — on `send()`, on `request()`, and on a handler's reply — so there is nothing to wire up. Turn it off with `Config(attach_grants=False)`.
+
+Selection mirrors the policy and deliberately errs wide: everything that plausibly applies goes on the wire, because over-attaching is free (the policy allows on the first passing grant) while withholding one costs a working call and fails silently. Validity and revocation are the node's decision, not this side's.
+
+```python
+# A grant you were just given is invisible until the cache lapses (60s).
+# If you have just been told you were granted something, say so:
+client.refresh_grants()
+```
+
+### When a message goes out with nothing attached
+
+The node's denial names the grant it could not find, which reads as "your grant is misconfigured" when the truth is "no credential was ever put on the wire". Only the sender knows which one it was. Wire `on_grant_miss` and the next such incident is one log line:
+
+```python
+def grant_miss(info: GrantMissInfo) -> None:
+    logging.warning("grant miss: %s", info)
+
+client = Client(Config(..., on_grant_miss=grant_miss), log_errors())
+```
+
+It fires in three cases, distinguished by which field is set:
+
+| Field | Meaning |
+|---|---|
+| `denial_code` | The node denied a message we sent with **nothing attached** |
+| `capped` | More grants covered the message than fit on it (`{"covering": n, "attached": 16}`) |
+| `error` | The grants could not be **read** — every send after this is flying blind |
+
+It deliberately does **not** fire merely because a message went out unattached: most traffic (discovery, trust-ping, problem reports) needs no grant, and a diagnostic that fires constantly is one nobody reads when it matters.
+
+### Attaching one by hand
+
+`media_type` is the only field the node's credential extractor filters on, by exact string equality, and it drops everything else **silently** — producing a denial byte-for-byte identical to the one for attaching nothing. Attach the credential **bare**; a Verifiable Presentation (`application/vp+jwt`) is dropped on that rule.
+
+```python
+Attachment(
+    id="urn:uuid:…",
+    media_type="application/vc+jwt",
+    data=AttachmentData(jws=compact_jws),
+)
+```
+
+## MCP (tool calling) over DIDComm
+
+Layr8 services expose an MCP surface as DIDComm request/reply. `client.mcp()` removes the boilerplate — the protocol subscription, the type mapping (`tools/call` → `{base}/tools-call`), the JSON-RPC envelope, and unwrapping `result`.
+
+It must be called **before** `connect()`, like `handle()`: it registers the protocol subscription the node needs in order to deliver replies.
+
+```python
+mcp = client.mcp()                     # default base: mcp/1.0
+await client.connect()
+
+loom = mcp.peer(loom_did)
+
+await loom.initialize()
+tools = await loom.list_tools()
+result = await loom.call_tool("create_workflow", {"name": "onboarding"})
+```
+
+`McpError` is raised when the peer answers with a JSON-RPC `error`; a DIDComm-level failure — including an authorization denial — raises `ProblemReportError`, and an unanswered call raises `asyncio.TimeoutError`.
+
+## Watching for changes (SpaceWatcher)
+
+Nothing on the wire tells an SDK "your wallet changed" or "a resource came up", so both are polled. `SpaceWatcher` is the one place that loop lives, on semantics shared with every other Layr8 SDK.
+
+```python
+watcher = SpaceWatcher(
+    fetch_wallet=lambda: list_my_grant_ids(),
+    fetch_resources=lambda: list_mcp_instance_dids(),
+    on_wallet_change=lambda wallet: rebuild_tools(),
+    on_resources_change=lambda resources: rebuild_routes(resources),
+)
+await watcher.start()      # seeds both baselines silently
+...
+await watcher.refresh_wallet()   # pull the next check forward
+await watcher.stop()
+```
+
+Neither callback fires on the first successful poll — a cold start is not a change. A fetch error never wipes state: it goes to `on_error` and the last-accepted value is retained, so a transient failure never reads as "everything disappeared". An empty *resource* result is only believed after two consecutive empty polls, since a directory answering with nothing is as likely to be a keepalive blip as a real teardown; an empty *wallet* is believed immediately, because that is a real answer.
+
 ## W3C Verifiable Credentials
 
 The SDK provides methods for signing, verifying, storing, listing, and retrieving [W3C Verifiable Credentials](https://www.w3.org/TR/vc-data-model-2.0/). These operations use the cloud-node's REST API and the DID keys in the node's wallet.
@@ -443,6 +531,8 @@ The `format` argument accepts: `"compact_jwt"` (default), `"json"`, `"jwt"`, `"e
 ## W3C Verifiable Presentations
 
 Presentations wrap one or more signed credentials into a holder-signed envelope.
+
+> **A presentation is not how you authorize a message.** The node keeps only attachments whose `media_type` is exactly `application/vc+jwt` and drops a `vp+jwt` silently — an identical denial to attaching nothing. Attach the credential bare, or let the SDK do it, which it does by default. See [Verifiable Grants](#verifiable-grants).
 
 ### Sign a Presentation
 
