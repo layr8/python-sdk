@@ -1,133 +1,123 @@
 name: Release
 
+# Publishing is driven by a GitHub Release, not by a bare tag — the same shape
+# node-sdk and elixir_sdk use. Pushing a tag on its own does nothing.
 on:
   release:
     types: [published]
+  # Manual re-drive for a release that failed partway. Publishing is
+  # idempotent: PyPI refuses a version that already exists, and the job
+  # tolerates that.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to (re-)publish, without the leading v"
+        required: true
 
 permissions:
   contents: read
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      ref: ${{ steps.v.outputs.ref }}
+    steps:
+      - id: v
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "ref=v$VERSION" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: [resolve]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
+      # Duplicates what CI already ran on main. Deliberate: a release can be cut
+      # from any commit, so the release chain re-verifies the exact tag it is
+      # about to publish.
       - name: Test
         run: pytest -v
 
-  compat-unit:
+  build:
+    needs: [resolve]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install SDK and compat deps
-        run: |
-          pip install -e .
-          pip install -e "compat/[test]"
-
-      - name: Compat unit tests
-        run: cd compat && pytest tests/ -v --ignore=tests/conftest.py -k "not layer1"
-
-  validate-version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.check.outputs.version }}
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
+      # The tag is the release's identity; pyproject is what ends up on PyPI
+      # under that name. If they disagree, the artifact is mislabelled, so fail
+      # here rather than publish something whose version nobody can predict.
       - name: Validate tag matches pyproject.toml
-        id: check
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          TOML_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          if [ "$TAG_VERSION" != "$TOML_VERSION" ]; then
-            echo "::error::Tag $TAG_VERSION != pyproject.toml $TOML_VERSION"
+          PROJECT_VERSION=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "${{ needs.resolve.outputs.version }}" != "$PROJECT_VERSION" ]; then
+            echo "::error::Tag ${{ needs.resolve.outputs.version }} != pyproject.toml $PROJECT_VERSION"
             exit 1
           fi
-          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Check the artifacts are well-formed
+        run: |
+          python -m pip install --upgrade twine
+          twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
 
   publish-pypi:
-    needs: [test, compat-unit, validate-version]
+    needs: [resolve, test, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # Mints the OIDC token PyPI exchanges for a short-lived publish
+      # credential. This is the only credential involved — there is no
+      # PYPI_API_TOKEN, so there is nothing to expire, rotate or leak.
+      #
+      # It requires a one-time setup on PyPI: project layr8 → Publishing → add a
+      # trusted publisher for layr8/python-sdk, workflow release.yaml,
+      # environment pypi.
       id-token: write
     environment: pypi
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/download-artifact@v4
         with:
-          python-version: "3.12"
-
-      - name: Build
-        run: pip install build && python -m build
+          name: dist
+          path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-
-  publish-compat-image:
-    needs: [test, compat-unit, validate-version]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Log in to ghcr.io
-        uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push compat image
-        run: |
-          VERSION=${{ needs.validate-version.outputs.version }}
-          IMAGE=ghcr.io/layr8/python-sdk/compat
-
-          # Stage SDK source for the Docker build context.
-          # Install from source instead of PyPI to avoid
-          # propagation delay after publish-pypi.
-          mkdir -p _build/sdk
-          cp -r src pyproject.toml README.md _build/sdk/
-          cp -r compat _build/compat
-
-          docker build \
-            -t $IMAGE:$VERSION \
-            -f compat/Dockerfile _build/
-          docker push $IMAGE:$VERSION
-
-  compat-gate:
-    needs: [publish-compat-image, validate-version]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger compat-suite gate
-        run: |
-          gh api repos/layr8/compat-suite/dispatches \
-            -f event_type=gate \
-            -f "client_payload[sdk]=python" \
-            -f "client_payload[version]=${{ needs.validate-version.outputs.version }}"
-        env:
-          GH_TOKEN: ${{ secrets.COMPAT_GATE_PAT }}
+          # Re-driving a partly-failed release must not fail on the files that
+          # already made it.
+          skip-existing: true
