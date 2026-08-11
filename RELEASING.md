@@ -103,6 +103,8 @@ pip index versions layr8
 
 ## History
 
-Releases up to and including `v0.2.12` were uploaded by hand — this repository had no
-publish workflow, only CI. `v0.2.12` is tagged but was **not** published by automation;
-if it is missing from PyPI, re-drive it with the manual trigger above.
+Releases up to and including `v0.2.11` were uploaded by hand — this repository had no
+publish workflow, only CI. `v0.2.12` is the first release published by automation: it
+was tagged before this workflow existed, then published with the manual re-drive
+(`gh workflow run release.yaml -f version=0.2.12`), which is also the proof that the
+trusted-publisher setup works.
