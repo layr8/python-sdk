@@ -20,7 +20,8 @@ class _LocalhostResolver(DefaultResolver):
     """Resolver that maps ``*.localhost`` to ``127.0.0.1``.
 
     This matches the Go SDK's custom dialer behavior, ensuring REST API
-    calls work with local-dev-stack hostnames like ``alice-test.localhost``.
+    calls work against a local development environment that serves hostnames
+    like ``alice-test.localhost``.
     """
 
     async def resolve(

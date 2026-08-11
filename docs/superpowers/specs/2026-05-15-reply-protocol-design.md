@@ -1,11 +1,11 @@
-# LAYR8-610: Reply Protocol, Wildcard Binding, Capability Negotiation
+# Reply Protocol, Wildcard Binding, Capability Negotiation
 
-**Jira:** LAYR8-610
+
 **Date:** 2026-05-15
 
 ## Overview
 
-The cloud node (LAYR8-580) added a new plugin dispatch protocol. After each inbound message, the SDK sends a `dispatch_reply` event telling the node whether the message was handled, passed, or errored. This replaces the old ack mechanism and enables the node to route unhandled messages to other plugins.
+The cloud node added a new plugin dispatch protocol. After each inbound message, the SDK sends a `dispatch_reply` event telling the node whether the message was handled, passed, or errored. This replaces the old ack mechanism and enables the node to route unhandled messages to other plugins.
 
 ## 1. PASS Sentinel
 

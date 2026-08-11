@@ -23,6 +23,13 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/layr8"]
 
+# The sdist carried the whole repository, including design documents and an
+# operations runbook that names infrastructure by its internal coordinates. A
+# source distribution exists so the package can be built from source; none of
+# that is needed for it, and shipping it published internal references to PyPI.
+[tool.hatch.build.targets.sdist]
+exclude = ["docs", "notes", ".github", "CONTEXT.md"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
