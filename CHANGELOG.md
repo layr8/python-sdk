@@ -6,6 +6,8 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-08-10
+
 ### Added
 
 - **Verifiable Grants are attached to outbound messages** — automatically, on
@@ -69,3 +71,5 @@ This file starts here. Earlier releases are recorded only in git history.
 
 - `RestClient.__init__` takes an optional `timeout_ms`. Additive; existing
   positional calls are unaffected.
+
+[0.2.12]: https://github.com/layr8/python-sdk/releases/tag/v0.2.12
