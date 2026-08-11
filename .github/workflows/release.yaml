@@ -1,7 +1,7 @@
 name: Release
 
 # Publishing is driven by a GitHub Release, not by a bare tag — the same shape
-# node-sdk and elixir_sdk use. Pushing a tag on its own does nothing.
+# the other Layr8 SDKs use. Pushing a tag on its own does nothing.
 on:
   release:
     types: [published]
@@ -89,6 +89,18 @@ jobs:
         run: |
           python -m pip install --upgrade twine
           twine check dist/*
+
+      # The artifacts, not the source tree. The sdist used to carry design
+      # documents and an operations runbook that named infrastructure by its
+      # internal coordinates, and once on PyPI that cannot be taken back. This
+      # is the last point at which it is still preventable.
+      - name: Check the artifacts for internal references
+        env:
+          INTERNAL_NAMES: ${{ secrets.INTERNAL_NAMES }}
+        run: |
+          for artifact in dist/*; do
+            ./scripts/check-public-hygiene.sh --tarball "$artifact"
+          done
 
       - uses: actions/upload-artifact@v4
         with:

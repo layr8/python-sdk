@@ -1,4 +1,4 @@
-"""Layer 2 CLI adapter for the compat-suite orchestrator.
+"""Layer 2 CLI adapter for the cross-language compatibility orchestrator.
 
 Usage:
     python -m bin.compat --list-scenarios
@@ -43,7 +43,7 @@ def _module_name(scenario: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Layr8 compat-suite CLI adapter")
+    parser = argparse.ArgumentParser(description="Layr8 compatibility CLI adapter")
     parser.add_argument("--mode", choices=["sender", "receiver"])
     parser.add_argument("--scenario")
     parser.add_argument("--node", help="Cloud-node WebSocket URL")

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add dispatch_reply protocol, wildcard binding, capability negotiation, and PASS sentinel to the Python SDK (LAYR8-610).
+**Goal:** Add dispatch_reply protocol, wildcard binding, capability negotiation, and PASS sentinel to the Python SDK.
 
 **Architecture:** Flag-driven branching — after join, a `reply_protocol` bool on the channel selects new-mode (dispatch_reply) or legacy-mode (ack). Handler registry gains a catch-all slot. PASS sentinel is a singleton object handlers return to decline a message.
 
@@ -24,7 +24,6 @@
 """Tests for layr8.sentinel."""
 
 from __future__ import annotations
-
 
 class TestPassSentinel:
     def test_is_singleton(self) -> None:
@@ -64,7 +63,6 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'layr8.sentinel'`
 
 from __future__ import annotations
 
-
 class _Pass:
     """Sentinel returned by handlers to signal 'I don't handle this'."""
 
@@ -80,7 +78,6 @@ class _Pass:
 
     def __bool__(self) -> bool:
         return False
-
 
 PASS = _Pass()
 ```
@@ -139,7 +136,6 @@ Remove the `manual_ack` parameter from `register()` and the `manual_ack=manual_a
 @dataclass
 class HandlerEntry:
     fn: HandlerFn
-
 
 class HandlerRegistry:
     def __init__(self) -> None:

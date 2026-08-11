@@ -612,7 +612,7 @@ The `compat/` directory contains the compatibility test suite — scenarios that
 
 - **Scenarios** (`compat/scenarios/`) — pure async Python, no framework dependencies. Each scenario exposes `run_receiver(ctx, on_ready=)` and `run_sender(ctx)` functions.
 - **Layer 1** (`compat/tests/`) — pytest + testcontainers adapter. Spins up real cloud-node Docker containers and runs scenarios against them.
-- **Layer 2** (`compat/bin/compat.py`) — CLI adapter for the compat-suite orchestrator. Implements the standard interface: `--mode sender|receiver --scenario <name> --node <url> --did <did>`.
+- **Layer 2** (`compat/bin/compat.py`) — CLI adapter for the cross-language compatibility orchestrator. Implements the standard interface: `--mode sender|receiver --scenario <name> --node <url> --did <did>`.
 
 ```bash
 # Unit tests (mock server, no Docker needed)
