@@ -96,7 +96,7 @@ jobs:
       # is the last point at which it is still preventable.
       - name: Check the artifacts for internal references
         env:
-          INTERNAL_NAMES: ${{ secrets.INTERNAL_NAMES }}
+          INTERNAL_NAMES: ${{ vars.INTERNAL_NAMES }}
         run: |
           for artifact in dist/*; do
             ./scripts/check-public-hygiene.sh --tarball "$artifact"
