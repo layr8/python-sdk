@@ -25,7 +25,6 @@
 
 from __future__ import annotations
 
-
 class TestPassSentinel:
     def test_is_singleton(self) -> None:
         from layr8.sentinel import _Pass
@@ -64,7 +63,6 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'layr8.sentinel'`
 
 from __future__ import annotations
 
-
 class _Pass:
     """Sentinel returned by handlers to signal 'I don't handle this'."""
 
@@ -80,7 +78,6 @@ class _Pass:
 
     def __bool__(self) -> bool:
         return False
-
 
 PASS = _Pass()
 ```
@@ -139,7 +136,6 @@ Remove the `manual_ack` parameter from `register()` and the `manual_ack=manual_a
 @dataclass
 class HandlerEntry:
     fn: HandlerFn
-
 
 class HandlerRegistry:
     def __init__(self) -> None:

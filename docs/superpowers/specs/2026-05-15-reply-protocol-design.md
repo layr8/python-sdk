@@ -1,6 +1,5 @@
 # Reply Protocol, Wildcard Binding, Capability Negotiation
 
-
 **Date:** 2026-05-15
 
 ## Overview
