@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "layr8"
-version = "0.2.11"
+version = "0.2.12"
 description = "Layr8 DIDComm Agent SDK for Python"
 readme = {text = "Layr8 DIDComm Agent SDK for Python", content-type = "text/plain"}
 requires-python = ">=3.11"
