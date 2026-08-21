@@ -4,7 +4,7 @@ All notable changes to `layr8`. Format loosely follows [Keep a Changelog](https:
 
 This file starts here. Earlier releases are recorded only in git history.
 
-## [Unreleased]
+## [0.2.13] - 2026-08-21
 
 ### Added
 
@@ -96,4 +96,5 @@ This file starts here. Earlier releases are recorded only in git history.
 - `RestClient.__init__` takes an optional `timeout_ms`. Additive; existing
   positional calls are unaffected.
 
+[0.2.13]: https://github.com/layr8/python-sdk/releases/tag/v0.2.13
 [0.2.12]: https://github.com/layr8/python-sdk/releases/tag/v0.2.12

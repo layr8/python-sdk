@@ -11,6 +11,7 @@ server in ``test_wallet.py``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from typing import Any
 
@@ -350,6 +351,72 @@ class TestIdentityCredentialOnTheWire:
             identity_attachment("not-a-jws")
         with pytest.raises(ValueError, match="compact JWS"):
             identity_attachment("a.b.")
+
+    def test_an_undecodable_attachment_is_not_an_identity_credential(self) -> None:
+        # Counting three segments is not reading a credential. Each of these has
+        # three of them and decodes to nothing usable, so nothing here can say
+        # whether it carries a `credentialSubject.scope`.
+        #
+        # "I could not read a scope" must not collapse into "there is no scope,
+        # so this is identity". Identity is the ONE attachment shape that leaves
+        # the wallet running, so that collapse hands a caller who attached
+        # garbage the wallet's grants, appended silently, while every other
+        # foreign attachment stands the wallet aside. The caller chose nothing
+        # and got a disclosure.
+        def seg(raw: bytes) -> str:
+            return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+        undecodable = [
+            "..",
+            "a.b.c",
+            f"{seg(b'{}')}.{seg(b'not json at all')}.c2ln",
+            # Valid JSON, but a scalar: it parses, and then has no
+            # `credentialSubject` to read — which looked exactly like a
+            # scope-free credential.
+            f"{seg(b'{}')}.{seg(b'42')}.c2ln",
+        ]
+
+        for raw in undecodable:
+            assert not is_identity_attachment(
+                Attachment(media_type="application/vc+jwt", data=AttachmentData(jws=raw))
+            ), raw
+            with pytest.raises(ValueError, match="compact JWS"):
+                identity_attachment(raw)
+
+    async def test_identity_mixed_with_a_grant_still_displaces_the_wallet(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        # The narrowing is "the caller's attachments are ALL identity
+        # credentials", not "at least one of them is". A caller that supplied a
+        # grant of its own has said which grant to use, and the wallet appending
+        # its own selection behind that would be overriding an explicit choice —
+        # the same silent substitution the whole path exists to avoid. Mixing
+        # the two is the case where both rules apply at once, and nothing pinned
+        # which one wins.
+        client, _ = make_client(mock_server, records=[grant_record(scope=COVERING)])
+        raw = identity_jwt()
+        mine = grant_record(scope=COVERING, cred_id="urn:uuid:mine", sig="mine")
+
+        await client.connect()
+        try:
+            await client.send(
+                a_message(
+                    attachments=[
+                        identity_attachment(raw),
+                        Attachment(
+                            id="mine",
+                            media_type="application/vc+jwt",
+                            data=AttachmentData(jws=mine["credential_jwt"]),
+                        ),
+                    ]
+                )
+            )
+        finally:
+            await client.close()
+
+        (payload,) = sent_messages(mock_server)
+        # Both of the caller's survive, in order, and the wallet adds nothing.
+        assert [a["id"] for a in payload["attachments"]] == ["urn:uuid:idc-1", "mine"]
 
 
 class TestGrantMiss:
