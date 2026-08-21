@@ -55,38 +55,69 @@ from .message import Attachment, AttachmentData
 CREDENTIAL_MEDIA_TYPE = "application/vc+jwt"
 
 
-def _decode_jwt_payload(jwt: str) -> dict[str, Any]:
+#: A payload that decodes and carries a non-empty ``credentialSubject.scope``.
+GRANT = "grant"
+#: A payload that decodes and carries no scope.
+IDENTITY = "identity"
+#: A payload that does not decode at all. Neither of the above.
+UNDECODABLE = "undecodable"
+
+
+def _decode_jwt_payload(jwt: str) -> dict[str, Any] | None:
     """Deliberately a local copy of ``wallet._decode_jwt_payload``.
 
     The identity path runs BESIDE the grant wallet, not through it. Importing
     from ``wallet`` would quietly make this path depend on a module whose job is
     grant selection; ten lines of base64url is the cheaper coupling to avoid.
+
+    Returns ``None`` — not ``{}`` — when the payload cannot be read, so the
+    caller can tell "this credential has no scope" from "I could not read this
+    at all". A JSON scalar or array decodes without raising and has no
+    ``credentialSubject`` to look at, which is indistinguishable downstream from
+    a scope-free credential; it counts as unreadable here.
     """
     parts = jwt.split(".")
     if len(parts) < 2:
-        return {}
+        return None
     seg = parts[1]
     seg += "=" * (-len(seg) % 4)
     try:
         payload = json.loads(base64.urlsafe_b64decode(seg))
     except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
-def _scope_of(jws: str) -> list[Any]:
-    """``credentialSubject.scope`` of a compact JWS, as the node reads it.
+def _credential_shape(jws: str) -> str:
+    """What a compact JWS is, by the same test the node routes on.
+
+    THREE outcomes, not two: :data:`GRANT`, :data:`IDENTITY`, and
+    :data:`UNDECODABLE` for a payload that cannot be read at all.
+
+    The third one is why this is not a predicate. A helper that answers "no
+    scope" both for a credential that has none and for a string it could not
+    decode makes an undecodable attachment indistinguishable from an identity
+    credential. That is not cosmetic: identity credentials are the one caller
+    attachment shape that does NOT stand the wallet aside, so a caller who
+    attached three dots and a shrug would get the wallet's grants appended to
+    its message — a disclosure it never asked for, chosen silently, which is the
+    exact thing the explicit-selection rule exists to forbid. Every other
+    foreign attachment displaces the wallet; something unreadable has to behave
+    like the rest of them, not like the privileged case.
 
     Claims are at the TOP LEVEL of the payload on this node; the ``vc`` wrapper
     is the standard alternative and both are accepted — same as
     ``parse_credential``.
     """
     payload = _decode_jwt_payload(jws)
+    if payload is None:
+        return UNDECODABLE
     vc = payload["vc"] if isinstance(payload.get("vc"), dict) else payload
     cs = vc.get("credentialSubject")
     cs = cs if isinstance(cs, dict) else {}
     scope = cs.get("scope")
-    return scope if isinstance(scope, list) else []
+    scope = scope if isinstance(scope, list) else []
+    return GRANT if scope else IDENTITY
 
 
 def identity_attachment(credential_jws: str) -> Attachment:
@@ -121,7 +152,18 @@ def identity_attachment(credential_jws: str) -> Attachment:
             "(three non-empty dot-separated segments)"
         )
 
-    if _scope_of(credential_jws):
+    shape = _credential_shape(credential_jws)
+
+    if shape == UNDECODABLE:
+        raise ValueError(
+            "identity_attachment: expected a compact JWS whose payload segment is "
+            "base64url-encoded JSON object. Three segments is not the same as three "
+            "READABLE segments: a payload that does not decode says nothing about "
+            "`credentialSubject.scope`, so nothing here can show it to be an identity "
+            "credential rather than a grant."
+        )
+
+    if shape == GRANT:
         raise ValueError(
             "identity_attachment: this credential has a non-empty "
             "`credentialSubject.scope`, so it is a Verifiable Grant, not an identity "
@@ -130,7 +172,8 @@ def identity_attachment(credential_jws: str) -> Attachment:
             "wallet attach grants, or pass it in `attachments` yourself."
         )
 
-    payload = _decode_jwt_payload(credential_jws)
+    # Not None: `shape` is IDENTITY, so the payload decoded to a dict.
+    payload = _decode_jwt_payload(credential_jws) or {}
     vc = payload["vc"] if isinstance(payload.get("vc"), dict) else payload
     cred_id = vc.get("id") or payload.get("jti")
 
@@ -152,10 +195,14 @@ def is_identity_attachment(att: Attachment | None) -> bool:
     message. Used by ``Client._with_grants`` to decide whether caller-supplied
     attachments should still displace the wallet. Nothing here trusts how the
     attachment was built: a hand-assembled one counts exactly the same.
+
+    False for an attachment whose ``jws`` does not decode, as well as for one
+    that carries a scope. Only a credential this can actually READ as scope-free
+    is an identity credential; see :func:`_credential_shape`.
     """
     if att is None or att.media_type != CREDENTIAL_MEDIA_TYPE:
         return False
     jws = att.data.jws if att.data is not None else None
     if not isinstance(jws, str) or len(jws.split(".")) != 3:
         return False
-    return not _scope_of(jws)
+    return _credential_shape(jws) == IDENTITY
