@@ -434,6 +434,45 @@ Attachment(
 )
 ```
 
+Attachments you supply are never displaced. The single exception is [identity credentials](#identity-credentials), which are appended to rather than displacing the wallet's selection: they answer a different question.
+
+## Identity credentials
+
+A **grant** says what the sender may do. An **identity credential** says *who the sender is* — that it works for a particular company, holds a licence, is over eighteen. The cloud-node keeps them apart on one test, `credentialSubject.scope`: with a scope it is a grant; without one it is an identity credential and lands in the policy input a grant's `senderCredentials` requirement reads.
+
+Both ride in the same `attachments` list with the same `media_type="application/vc+jwt"`. `identity_attachment` builds the envelope:
+
+```python
+from layr8 import identity_attachment
+
+creds = await client.list_credentials()
+employment = next(c for c in creds if c.id == chosen_id)
+
+await client.send(Message(
+    to=[peer],
+    type="https://layr8.io/protocols/mcp/1.0/tools-call",
+    body={"params": {"name": "place_order"}},
+    attachments=[identity_attachment(employment.credential_jwt)],
+))
+```
+
+Attaching one does **not** cost the message its grants — the wallet's selection is appended after yours.
+
+### You choose, always
+
+The SDK will not pick identity credentials for you, and this is deliberate. The requirement you are trying to satisfy lives in the grant held by the *recipient*; it never reaches you before the call. An SDK selecting automatically would therefore have no criterion to select by, and exactly one implementable behaviour: attach everything you hold. Which claims about you or your organisation a counterparty gets to see is your decision, made per message — not a library default.
+
+### Errors
+
+`identity_attachment` raises `ValueError` rather than putting something on the wire that the far end will misread:
+
+| Argument | Result |
+| --- | --- |
+| Not a compact JWS (three non-empty segments) | Raises. The node can verify nothing else. |
+| A credential with a non-empty `credentialSubject.scope` | Raises — that is a grant. Attached this way it would be routed as one, satisfy no `senderCredentials` requirement, and produce a denial identical to attaching nothing. Let the wallet handle grants. |
+
+An expired or revoked identity credential is **admitted** by the node today: validity is not checked on this input. Do not treat arrival as proof of currency.
+
 ## MCP (tool calling) over DIDComm
 
 Layr8 services expose an MCP surface as DIDComm request/reply. `client.mcp()` removes the boilerplate — the protocol subscription, the type mapping (`tools/call` → `{base}/tools-call`), the JSON-RPC envelope, and unwrapping `result`.

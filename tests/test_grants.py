@@ -14,11 +14,23 @@ import asyncio
 import json
 from typing import Any
 
-from layr8 import Attachment, AttachmentData, Client, Config, GrantMissInfo, Message, SDKError
+import pytest
+
+from layr8 import (
+    Attachment,
+    AttachmentData,
+    Client,
+    Config,
+    GrantMissInfo,
+    Message,
+    SDKError,
+    identity_attachment,
+    is_identity_attachment,
+)
 from layr8.wallet import Wallet
 
 from .test_client import MockPhoenixServer, mock_server, ws_url  # noqa: F401
-from .test_wallet import grant_record
+from .test_wallet import grant_record, jwt
 
 
 def _discard_errors(err: SDKError) -> None:
@@ -113,8 +125,13 @@ class TestAttachmentOnTheWire:
         # Someone passing their own has a reason, and silently overriding it
         # would be the second confusing thing to happen to that message.
         client, calls = make_client(mock_server, records=[grant_record(scope=COVERING)])
+        # A GRANT of the caller's own. The fixture used to be an undecodable
+        # three-segment string, which now reads as an identity credential (no
+        # scope) and so exercises the narrowing below instead of this rule.
         mine = Attachment(
-            id="mine", media_type="application/vc+jwt", data=AttachmentData(jws="caller.jwt.x")
+            id="mine",
+            media_type="application/vc+jwt",
+            data=AttachmentData(jws=grant_record(scope=COVERING, cred_id="mine")["credential_jwt"]),
         )
 
         await client.connect()
@@ -237,6 +254,102 @@ class TestAttachmentOnTheWire:
             assert [p["body"]["n"] for p in sent_messages(mock_server)] == [1, 2]
         finally:
             await client.close()
+
+
+def identity_jwt(cred_id: str = "urn:uuid:idc-1", sig: str = "identity-sig") -> str:
+    """An identity credential: same claims shape as a grant, and NO
+    ``credentialSubject.scope``. That absence is the entire discriminator, on
+    this side and on the node's."""
+    return jwt(
+        {
+            "id": cred_id,
+            "type": ["VerifiableCredential", "EmploymentCredential"],
+            "issuer": "did:web:issuer.localhost",
+            "credentialSubject": {
+                "id": "did:web:alice.localhost",
+                "employer": "Example Incorporated",
+                "role": "buyer",
+            },
+        },
+        sig,
+    )
+
+
+class TestIdentityCredentialOnTheWire:
+    """Boundary test for the sender -> cloud-node identity-credential contract.
+
+    The node routes an attachment on ``credentialSubject.scope`` alone, so the
+    two claims this SDK must keep straight are "no scope, so identity" and "has
+    a scope, so grant".
+    """
+
+    async def test_it_goes_out_exactly_as_the_caller_built_it(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        client, _ = make_client(mock_server, records=[])
+        raw = identity_jwt()
+
+        await client.connect()
+        try:
+            await client.send(a_message(attachments=[identity_attachment(raw)]))
+        finally:
+            await client.close()
+
+        (payload,) = sent_messages(mock_server)
+        assert payload["attachments"][0] == {
+            "id": "urn:uuid:idc-1",
+            "media_type": "application/vc+jwt",
+            "data": {"jws": raw},
+        }
+
+    async def test_it_does_not_cost_the_message_its_grant(
+        self, mock_server: MockPhoenixServer
+    ) -> None:
+        # The half that would be silently wrong. Under the old rule ANY
+        # caller-supplied attachment made the wallet stand aside, so saying who
+        # you are meant sending nothing that says what you may do — and the
+        # node's denial then read "no grant covers this call", which is exactly
+        # the message that sends people looking at their grant configuration.
+        rec = grant_record(scope=COVERING)
+        client, _ = make_client(mock_server, records=[rec])
+        raw = identity_jwt()
+
+        await client.connect()
+        try:
+            await client.send(a_message(attachments=[identity_attachment(raw)]))
+        finally:
+            await client.close()
+
+        (payload,) = sent_messages(mock_server)
+        # The caller's stays FIRST and unmodified; the wallet's selection follows.
+        assert [a["id"] for a in payload["attachments"]] == ["urn:uuid:idc-1", "urn:uuid:grant-1"]
+        assert payload["attachments"][1]["data"] == {"jws": rec["credential_jwt"]}
+
+    def test_a_credential_with_a_scope_is_refused(self) -> None:
+        # Not a taste call. The node would route it to the policy's
+        # `credentials` input, where it can never satisfy a `senderCredentials`
+        # requirement, and the denial that follows is byte-for-byte the one for
+        # attaching nothing at all. The check is local and exact, so the choice
+        # is between raising at the call site and a misroute diagnosed at the
+        # far end.
+        grant = grant_record(scope=COVERING)["credential_jwt"]
+        with pytest.raises(ValueError, match="Verifiable Grant"):
+            identity_attachment(grant)
+
+        assert not is_identity_attachment(
+            Attachment(media_type="application/vc+jwt", data=AttachmentData(jws=grant))
+        )
+        assert is_identity_attachment(
+            Attachment(media_type="application/vc+jwt", data=AttachmentData(jws=identity_jwt()))
+        )
+
+    def test_anything_that_is_not_a_compact_jws_is_refused(self) -> None:
+        # The node can verify nothing else, so attaching it only buys a denial
+        # that names the wrong problem.
+        with pytest.raises(ValueError, match="compact JWS"):
+            identity_attachment("not-a-jws")
+        with pytest.raises(ValueError, match="compact JWS"):
+            identity_attachment("a.b.")
 
 
 class TestGrantMiss:

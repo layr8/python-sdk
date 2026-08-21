@@ -23,6 +23,7 @@ from .errors import (
     ServerRejectError,
 )
 from .handler import HandlerEntry, HandlerFn, HandlerRegistry
+from .identity import is_identity_attachment
 from .mcp import DEFAULT_MCP_BASE, McpBinding
 from .message import Message, generate_id, marshal_didcomm, parse_didcomm
 from .sentinel import _Pass
@@ -604,6 +605,17 @@ class Client:
         passing their own has a reason, and silently overriding it would be the
         second confusing thing to happen to that message.
 
+        With ONE narrowing, for identity credentials (see ``identity``). A
+        message whose caller-supplied attachments are ALL identity credentials
+        still gets the wallet's grants, appended after them. The two answer
+        different questions — "who is the sender" and "what may it do" — and the
+        node routes them to different policy inputs, so a caller who states who
+        it is must not thereby stop stating what it may do. Under the old rule
+        it did, and the denial that followed said "no grant covers this call":
+        the exact misleading message this whole path exists to stop producing.
+        Anything else the caller attaches — a grant, a document, a JSON blob —
+        still displaces the wallet, unchanged.
+
         A wallet failure does NOT block the send. The node is the authority on
         whether this message needed a grant, and most traffic (discovery,
         trust-ping, problem reports) needs none; refusing here on a transient
@@ -615,7 +627,11 @@ class Client:
         ``Config.grant_read_timeout_ms``, enforced on the request itself, and a
         lapsed deadline arrives here as an ordinary read error.
         """
-        if self._wallet is None or msg.attachments:
+        if self._wallet is None:
+            return msg
+
+        own = msg.attachments or []
+        if own and not all(is_identity_attachment(a) for a in own):
             return msg
 
         try:
@@ -643,7 +659,10 @@ class Client:
             return msg
 
         if attachments:
-            msg.attachments = attachments
+            # The caller's entries stay, first and unmodified. The wallet only
+            # ever appends here — `own` is empty in every case but the identity
+            # one.
+            msg.attachments = [*own, *attachments]
             return msg
 
         # Nothing covered it — remembered, not announced.
