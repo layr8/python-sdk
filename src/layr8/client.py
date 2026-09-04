@@ -304,8 +304,16 @@ class Client:
         if self._closed:
             raise ClientClosedError()
 
+        # A mediated client must bind BOTH mediation protocols at join, not just
+        # messagepickup/3.0 (which the delivery handler brings): the node routes
+        # a typed reply only to a session that subscribed to its protocol, so
+        # without coordinate-mediation/3.0 here the mediate-grant / recipient
+        # replies are dropped and enrolment times out. Correlated replies still
+        # resolve their pending future before any handler runs, so no handler is
+        # needed for these — only the subscription.
+        extra = list(mediation.MEDIATION_PROTOCOLS) if self._cfg.mediator else []
         protocols = list(dict.fromkeys(
-            self._cfg.protocols + self._registry.protocols()
+            self._cfg.protocols + self._registry.protocols() + extra
         ))
 
         channel = PhoenixChannel(

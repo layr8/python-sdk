@@ -258,7 +258,10 @@ async def _wait_for(pred: Any, timeout: float = 5.0) -> None:
 
 def _client(mock_server: MockPhoenixServer, ingress: FakeIngress, errors: list[SDKError], **cfg: Any) -> Client:
     client = Client(
-        Config(node_url=ws_url(mock_server), api_key="k", agent_did=ALICE, mediator=MEDIATOR, didcomm_url=ingress.url, **cfg),
+        Config(
+            node_url=ws_url(mock_server), api_key="k", agent_did=ALICE,
+            mediator=MEDIATOR, didcomm_url=ingress.url, attach_grants=False, **cfg,
+        ),
         errors.append,
     )
     client._rest = FakeRest()  # type: ignore[assignment]
@@ -273,8 +276,10 @@ async def test_bootstrap_on_connect_enrols_declares_collects_and_goes_live(mock_
     await client.connect()
     await _wait_for(lambda: f"{PICKUP}live-delivery-change" in med.types())
 
-    # The delivery handler's protocol went out with the join.
+    # Both mediation protocols went out with the join, so the node delivers the
+    # coordinate-mediation and messagepickup reply legs.
     assert "https://didcomm.org/messagepickup/3.0" in med.joined_protocols
+    assert "https://didcomm.org/coordinate-mediation/3.0" in med.joined_protocols
     # enrol → declare → pickup (one delivery round, ack) → drained → live on
     assert med.types() == [
         f"{CM}mediate-request",
@@ -344,7 +349,7 @@ async def test_mediate_deny_is_reported_as_a_mediation_error(mock_server: MockPh
 async def test_steps_by_hand_return_results_and_never_raise(mock_server: MockPhoenixServer, ingress: FakeIngress) -> None:
     med = MockMediator(mock_server, queued=[attachment("m1")])
     errors: list[SDKError] = []
-    client = Client(Config(node_url=ws_url(mock_server), api_key="k", agent_did=ALICE), errors.append)
+    client = Client(Config(node_url=ws_url(mock_server), api_key="k", agent_did=ALICE, attach_grants=False), errors.append)
     client._rest = FakeRest()  # type: ignore[assignment]
     await client.connect()
     assert client.mediator is None
@@ -373,6 +378,6 @@ async def test_steps_by_hand_return_results_and_never_raise(mock_server: MockPho
 
 
 async def test_no_mediator_registers_no_delivery_handler(mock_server: MockPhoenixServer) -> None:
-    client = Client(Config(node_url=ws_url(mock_server), api_key="k", agent_did=ALICE), lambda e: None)
+    client = Client(Config(node_url=ws_url(mock_server), api_key="k", agent_did=ALICE, attach_grants=False), lambda e: None)
     assert client._registry.lookup(DELIVERY_TYPE) is None
     assert client.didcomm_url == f"http://127.0.0.1:{mock_server.port}/didcomm"
