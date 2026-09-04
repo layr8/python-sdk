@@ -228,6 +228,9 @@ Configuration can be set explicitly or via environment variables. Environment va
 | `grant_cache_ms` | `LAYR8_GRANT_CACHE_MS` | No | How long held grants are cached. Default `60_000` |
 | `grant_read_timeout_ms` | `LAYR8_GRANT_READ_TIMEOUT_MS` | No | Deadline on the credential read. Default `2_000` |
 | `rest_timeout_ms` | `LAYR8_REST_TIMEOUT_MS` | No | Deadline on every other REST call. Default `30_000`; `0` for none |
+| `mediator` | `LAYR8_MEDIATOR_DID` | No | Mediator to enrol with and collect from on every (re)connect — see [Mediation](#mediation-offline-delivery) |
+| `mediator_live` | `LAYR8_MEDIATOR_LIVE` | No | `False` leaves live delivery off after collection. Default `True` |
+| `didcomm_url` | `LAYR8_DIDCOMM_URL` | No | Where collected ciphertext is re-injected. Default `<rest url>/didcomm` |
 | `on_grant_miss` | — | No | Called when a grant was needed and not attached — see [Verifiable Grants](#verifiable-grants) |
 
 `agent_did` is required — set it explicitly or via `LAYR8_AGENT_DID`. It's the DID your agent connects as and the address other agents use to message it; the cloud-node rejects a connection that doesn't specify one. Retrieve the active DID at runtime with `client.did`.
@@ -473,6 +476,41 @@ The SDK will not pick identity credentials for you, and this is deliberate. The 
 
 An expired or revoked identity credential is **admitted** by the node today: validity is not checked on this input. Do not treat arrival as proof of currency.
 
+## Mediation (offline delivery)
+
+The cloud-node does not queue for an agent that is offline; a `layr8/mediator`
+in the Space does. Give the client the mediator's DID and it enrols, declares
+the mediator on its node, collects whatever was queued while it was away, and
+keeps live delivery on — on every connect and reconnect, in the background:
+
+```python
+client = Client(
+    Config(
+        node_url="wss://node.example.com/plugin_socket/websocket",
+        api_key=os.environ["LAYR8_API_KEY"],
+        agent_did="did:web:node.example.com:agents:me",
+        mediator="did:web:node.example.com:mediator",  # or LAYR8_MEDIATOR_DID
+    ),
+    log_errors(),
+)
+```
+
+Collected messages arrive through your ordinary handlers: the mediator holds
+the original ciphertext, and the client posts each one back to its own node's
+`/didcomm`, so it is unpacked, sender-bound and authorized exactly like a
+first arrival. Nothing in the SDK decrypts. A background step that fails
+reaches your error handler as `ErrorKind.MEDIATION`, with the step in `type`.
+
+Every step is also available by hand in the `layr8.mediation` module —
+`enroll`, `declare`, `undeclare`, `pickup`, `live`, `status`, `bootstrap` —
+and none of them raises for a remote refusal; they return a result with
+`ok=False` and the `error`. `mediator_live=False` collects but leaves live
+delivery off; `didcomm_url` overrides where ciphertext is re-injected.
+
+The agent needs protocol grants on the mediator for
+`coordinate-mediation/3.0` and `messagepickup/3.0`, which the wallet attaches
+like any other. Forwards to the mediator need none.
+
 ## MCP (tool calling) over DIDComm
 
 Layr8 services expose an MCP surface as DIDComm request/reply. `client.mcp()` removes the boilerplate — the protocol subscription, the type mapping (`tools/call` → `{base}/tools-call`), the JSON-RPC envelope, and unwrapping `result`.
@@ -597,6 +635,14 @@ Keyword arguments: `verifier_did`.
 ## Examples
 
 The [examples/](examples/) directory contains complete, runnable agents:
+
+### Mediated Agent
+
+An agent that collects what it missed while offline, through a mediator:
+
+```bash
+LAYR8_MEDIATOR_DID=did:web:node.example:mediator python examples/mediated_agent.py
+```
 
 ### Echo Agent
 

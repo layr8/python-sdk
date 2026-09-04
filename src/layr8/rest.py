@@ -125,6 +125,46 @@ class RestClient:
         ) as resp:
             return await self._handle_response(resp)
 
+    async def put(
+        self,
+        path: str,
+        body: dict[str, Any],
+        *,
+        timeout_ms: float | None = None,
+    ) -> dict[str, Any]:
+        """Send a JSON PUT request and return the decoded response."""
+        session = self._get_session()
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["x-api-key"] = self._api_key
+
+        async with session.put(
+            self._base_url + path,
+            data=json.dumps(body),
+            headers=headers,
+            timeout=self._timeout(timeout_ms),
+        ) as resp:
+            return await self._handle_response(resp)
+
+    async def delete(
+        self,
+        path: str,
+        *,
+        timeout_ms: float | None = None,
+    ) -> dict[str, Any]:
+        """Send a DELETE request; returns the decoded body, or ``{}`` for an empty one."""
+        session = self._get_session()
+        headers: dict[str, str] = {}
+        if self._api_key:
+            headers["x-api-key"] = self._api_key
+
+        async with session.delete(
+            self._base_url + path,
+            headers=headers,
+            timeout=self._timeout(timeout_ms),
+        ) as resp:
+            return await self._handle_response(resp)
+
     async def get(
         self,
         path: str,
@@ -160,6 +200,33 @@ class RestClient:
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+
+
+async def post_didcomm(
+    url: str,
+    jwe: bytes | str,
+    *,
+    timeout_ms: float = 30_000,
+) -> None:
+    """
+    Post a packed DIDComm message (the JWE bytes) to a node's public
+    ``/didcomm`` ingress — the re-injection step of mediation. No API key: the
+    ingress authenticates the message itself. Returns on 2xx, raises
+    :class:`RESTError` otherwise.
+    """
+    data = jwe.encode("utf-8") if isinstance(jwe, str) else jwe
+    connector = aiohttp.TCPConnector(resolver=_LocalhostResolver())
+    timeout = aiohttp.ClientTimeout(total=None if timeout_ms <= 0 else timeout_ms / 1000)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        async with session.post(
+            url,
+            data=data,
+            headers={"Content-Type": "application/didcomm-encrypted+json"},
+            timeout=timeout,
+        ) as resp:
+            body = await resp.read()
+            if resp.status >= 400:
+                raise _parse_rest_error(resp.status, body)
 
 
 def _parse_rest_error(status_code: int, body: bytes) -> RESTError:

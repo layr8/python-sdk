@@ -71,6 +71,9 @@ class Config:
       - grant_cache_ms -> LAYR8_GRANT_CACHE_MS
       - grant_read_timeout_ms -> LAYR8_GRANT_READ_TIMEOUT_MS
       - rest_timeout_ms -> LAYR8_REST_TIMEOUT_MS
+      - mediator -> LAYR8_MEDIATOR_DID
+      - mediator_live -> LAYR8_MEDIATOR_LIVE (default true)
+      - didcomm_url -> LAYR8_DIDCOMM_URL (default <rest url>/didcomm)
     """
 
     node_url: str = ""
@@ -107,6 +110,16 @@ class Config:
     #: which sends people to check a grant that is fine; only the sender knows
     #: no credential was ever on the wire.
     on_grant_miss: Callable[[GrantMissInfo], Any] | None = None
+    #: A mediator DID (see :mod:`layr8.mediation`): on every (re)connect the
+    #: client enrols, declares it on the node, collects what was queued while
+    #: offline and turns live delivery on. Fallback: ``LAYR8_MEDIATOR_DID``.
+    mediator: str | None = None
+    #: ``False`` collects but leaves live delivery off. Fallback:
+    #: ``LAYR8_MEDIATOR_LIVE`` (default ``True``).
+    mediator_live: bool | None = None
+    #: Where collected ciphertext is re-injected. Fallback:
+    #: ``LAYR8_DIDCOMM_URL``; default ``<rest url>/didcomm``.
+    didcomm_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +134,9 @@ class ResolvedConfig:
     grant_cache_ms: float = DEFAULT_GRANT_CACHE_MS
     grant_read_timeout_ms: float = DEFAULT_GRANT_READ_TIMEOUT_MS
     rest_timeout_ms: float = DEFAULT_REST_TIMEOUT_MS
+    mediator: str | None = None
+    mediator_live: bool = True
+    didcomm_url: str | None = None
 
 
 def resolve_config(cfg: Config) -> ResolvedConfig:
@@ -181,7 +197,17 @@ def resolve_config(cfg: Config) -> ResolvedConfig:
             os.environ.get("LAYR8_REST_TIMEOUT_MS"),
             DEFAULT_REST_TIMEOUT_MS,
         ),
+        mediator=_blank_to_none(cfg.mediator or os.environ.get("LAYR8_MEDIATOR_DID")),
+        mediator_live=_resolve_bool(
+            cfg.mediator_live, os.environ.get("LAYR8_MEDIATOR_LIVE"), True
+        ),
+        didcomm_url=_blank_to_none(cfg.didcomm_url or os.environ.get("LAYR8_DIDCOMM_URL")),
     )
+
+
+def _blank_to_none(value: str | None) -> str | None:
+    text = (value or "").strip()
+    return text or None
 
 
 def _resolve_bool(explicit: bool | None, raw: str | None, fallback: bool) -> bool:

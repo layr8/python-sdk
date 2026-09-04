@@ -78,6 +78,8 @@ class ErrorKind(enum.Enum):
     HANDLER_EXCEPTION = "HandlerException"
     SERVER_REJECT = "ServerReject"
     TRANSPORT_WRITE = "TransportWrite"
+    #: A background mediation step (enrol / declare / collect / live) failed.
+    MEDIATION = "Mediation"
 
 
 @dataclass

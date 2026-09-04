@@ -24,9 +24,14 @@ from .identity import (
     is_identity_attachment,
 )
 from .mcp import DEFAULT_MCP_BASE, McpBinding, McpError, McpPeer
+# Mediation (store-and-forward through a Space mediator): the steps live in
+# the `mediation` module; the client runs them itself when `Config.mediator`
+# is set.
+from . import mediation
+from .mediation import DELIVERY_TYPE as MEDIATION_DELIVERY_TYPE, MEDIATION_PROTOCOLS
 from .message import Attachment, AttachmentData, Credential, Message, MessageContext
 from .presentations import VerifiedPresentation
-from .rest import RESTError
+from .rest import RESTError, post_didcomm
 from .sentinel import PASS
 from .space_watch import SpaceWatcher, order_independent_signature
 from .wallet import HeldCredential, Wallet
@@ -55,6 +60,10 @@ __all__ = [
     "StoredCredential",
     "VerifiedPresentation",
     "RESTError",
+    "post_didcomm",
+    "mediation",
+    "MEDIATION_DELIVERY_TYPE",
+    "MEDIATION_PROTOCOLS",
     "Layr8Error",
     "NotConnectedError",
     "AlreadyConnectedError",
