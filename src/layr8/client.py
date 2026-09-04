@@ -25,6 +25,7 @@ from .errors import (
 from .handler import HandlerEntry, HandlerFn, HandlerRegistry
 from .identity import is_identity_attachment
 from .mcp import DEFAULT_MCP_BASE, McpBinding
+from . import mediation
 from .message import Message, generate_id, marshal_didcomm, parse_didcomm
 from .sentinel import _Pass
 from .presentations import VerifiedPresentation
@@ -122,6 +123,15 @@ class Client:
         # Disconnect / reconnect callbacks
         self._disconnect_fn: Callable[[Exception], None] | None = None
         self._reconnect_fn: Callable[[], None] | None = None
+
+        # A mediated client handles the mediator's live `delivery` pushes
+        # itself (re-inject + ack). Registered here, before connect(), so the
+        # protocol subscription goes out with the join.
+        self._mediation_task: asyncio.Task[None] | None = None
+        if self._cfg.mediator:
+            self._registry.register(
+                mediation.DELIVERY_TYPE, mediation.delivery_handler(self)
+            )
 
     @property
     def did(self) -> str:
@@ -231,6 +241,51 @@ class Client:
 
         return McpBinding(self, base)
 
+    @property
+    def mediator(self) -> str | None:
+        """The configured mediator DID, or None (see :mod:`layr8.mediation`)."""
+        return self._cfg.mediator
+
+    @property
+    def didcomm_url(self) -> str:
+        """Where collected ciphertext is re-injected: ``didcomm_url`` config, else ``<rest url>/didcomm``."""
+        return self._cfg.didcomm_url or (
+            rest_url_from_websocket(self._cfg.node_url) + "/didcomm"
+        )
+
+    def _start_mediation(self) -> None:
+        """
+        Off the connect path: every step is a request through this very
+        client, and a slow mediator must not stall connect() or reconnection.
+        Failures reach the ErrorHandler as ErrorKind.MEDIATION.
+        """
+        mediator = self._cfg.mediator
+        if not mediator or self._closed:
+            return
+        if self._mediation_task and not self._mediation_task.done():
+            self._mediation_task.cancel()
+        self._mediation_task = asyncio.create_task(self._run_mediation(mediator))
+
+    async def _run_mediation(self, mediator: str) -> None:
+        try:
+            result = await mediation.bootstrap(
+                self, mediator, live_delivery=self._cfg.mediator_live
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 — reported, never raised into the loop
+            self._on_error(SDKError(kind=ErrorKind.MEDIATION, from_did=mediator, cause=err))
+            return
+        if not result.ok:
+            cause = (
+                result.error
+                if isinstance(result.error, Exception)
+                else Exception(f"{result.step}: {result.error}")
+            )
+            self._on_error(
+                SDKError(kind=ErrorKind.MEDIATION, type=result.step, from_did=mediator, cause=cause)
+            )
+
     def refresh_grants(self, did: str | None = None) -> None:
         """Forget the cached grants for *did* (default: this agent's).
 
@@ -259,7 +314,7 @@ class Client:
             self._cfg.agent_did,
             on_message=self._handle_inbound_message,
             on_disconnect=self._on_disconnect,
-            on_reconnect=self._reconnect_fn,
+            on_reconnect=self._on_reconnect,
         )
 
         await channel.connect(protocols)
@@ -269,6 +324,7 @@ class Client:
 
         self._channel = channel
         self._connected = True
+        self._start_mediation()
 
     async def close(self) -> None:
         """Gracefully shut down the client connection."""
@@ -276,6 +332,10 @@ class Client:
             return
         self._closed = True
         self._connected = False
+
+        if self._mediation_task and not self._mediation_task.done():
+            self._mediation_task.cancel()
+        self._mediation_task = None
 
         if self._channel:
             await self._channel.close()
@@ -749,6 +809,12 @@ class Client:
         """Internal disconnect handler that forwards to user callback."""
         if self._disconnect_fn:
             self._disconnect_fn(err)
+
+    def _on_reconnect(self) -> None:
+        """Internal reconnect handler: user callback, then mediation again."""
+        if self._reconnect_fn:
+            self._reconnect_fn()
+        self._start_mediation()
 
     # ------------------------------------------------------------------
     # W3C Verifiable Credential APIs (REST, no WebSocket needed)
