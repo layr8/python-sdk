@@ -1065,3 +1065,46 @@ class TestReplyProtocol:
         assert len(reply_events) == 0
 
         await client.close()
+
+
+class TestJoinDidSpec:
+    """The phx_join did_spec.storage must follow the identity kind.
+
+    cloud-node reclaims a twin joined with storage "ephemeral" the moment it
+    disconnects, taking its mediator declaration with it. A fixed
+    agent_did is a durable identity and must join "persistent"; only a
+    node-assigned per-session DID (blank agent_did) is ephemeral.
+    """
+
+    @staticmethod
+    def _join_payload(server: MockPhoenixServer) -> dict[str, Any]:
+        joins = [m for m in server.get_received() if m["event"] == "phx_join"]
+        assert joins, "no phx_join was sent"
+        return joins[0]["payload"]
+
+    async def test_fixed_agent_did_joins_persistent(self, mock_server: MockPhoenixServer) -> None:
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="did:web:node:agents:fixed",
+        ), _discard_errors)
+        await client.connect()
+        try:
+            spec = self._join_payload(mock_server)["did_spec"]
+            assert spec["storage"] == "persistent"
+            assert spec["mode"] == "Create"
+            assert spec["type"] == "plugin"
+        finally:
+            await client.close()
+
+    async def test_blank_agent_did_joins_ephemeral(self, mock_server: MockPhoenixServer) -> None:
+        client = Client(Config(
+            node_url=ws_url(mock_server),
+            api_key="test-key",
+            agent_did="",
+        ), _discard_errors)
+        await client.connect()
+        try:
+            assert self._join_payload(mock_server)["did_spec"]["storage"] == "ephemeral"
+        finally:
+            await client.close()

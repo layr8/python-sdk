@@ -70,6 +70,7 @@ class PhoenixChannel:
     ) -> None:
         self._ws_url = ws_url
         self._api_key = api_key
+        self._agent_did = agent_did
         self._topic = f"plugins:{agent_did}"
         self._on_message = on_message
         self._on_disconnect = on_disconnect
@@ -154,12 +155,20 @@ class PhoenixChannel:
         ref = self._next_ref()
         self._join_ref = ref
 
+        # A fixed identity (agent_did given) joins as a PERSISTENT twin. Since
+        # cloud-node 4.19.3x (2026-09-08) a twin joined with
+        # storage "ephemeral" is reclaimed the moment it disconnects, and
+        # everything stored on the twin — its mediator declaration above all —
+        # dies with it, so messages sent while the agent was offline were
+        # dropped at the node instead of queued. Only a node-assigned
+        # per-session DID (blank agent_did) is ephemeral.
+        storage = "persistent" if self._agent_did else "ephemeral"
         join_payload: dict[str, Any] = {
             "payload_types": protocols,
             "reply_protocol": True,
             "did_spec": {
                 "mode": "Create",
-                "storage": "ephemeral",
+                "storage": storage,
                 "type": "plugin",
                 "verificationMethods": [
                     {"purpose": "authentication"},

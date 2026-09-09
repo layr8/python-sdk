@@ -4,6 +4,20 @@ All notable changes to `layr8`. Format loosely follows [Keep a Changelog](https:
 
 This file starts here. Earlier releases are recorded only in git history.
 
+## [0.2.15] - 2026-09-09
+
+### Fixed
+
+- **A fixed identity joins as a persistent twin.** `phx_join` sent
+  `did_spec.storage: "ephemeral"` for every join, including one with a fixed
+  `agent_did`. Since cloud-node 4.19.3x (2026-09-08) an ephemeral
+  twin is reclaimed the moment it disconnects, and everything stored on the
+  twin — its mediator declaration above all — dies with it: messages sent to
+  the agent while it was offline were dropped at the node instead of queued
+  by its mediator, with no problem-report. The channel now sends
+  `"persistent"` when `agent_did` is set and `"ephemeral"` only for a
+  node-assigned per-session DID. No API change.
+
 ## [0.2.14] - 2026-09-04
 
 ### Added
@@ -116,6 +130,7 @@ This file starts here. Earlier releases are recorded only in git history.
 - `RestClient.__init__` takes an optional `timeout_ms`. Additive; existing
   positional calls are unaffected.
 
+[0.2.15]: https://github.com/layr8/python-sdk/releases/tag/v0.2.15
 [0.2.14]: https://github.com/layr8/python-sdk/releases/tag/v0.2.14
 [0.2.13]: https://github.com/layr8/python-sdk/releases/tag/v0.2.13
 [0.2.12]: https://github.com/layr8/python-sdk/releases/tag/v0.2.12
