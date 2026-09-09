@@ -223,6 +223,7 @@ Configuration can be set explicitly or via environment variables. Environment va
 | `node_url` | `LAYR8_NODE_URL` | Yes | WebSocket URL of the cloud-node |
 | `api_key` | `LAYR8_API_KEY` | Yes | API key for authentication |
 | `agent_did` | `LAYR8_AGENT_DID` | Yes | Agent DID identity |
+| `parent_did` | — | No | The identity whose authority this DID borrows — see [Borrowing a parent's authority](#borrowing-a-parents-authority) |
 | `protocols` | — | No | Additional protocol URIs to advertise on join |
 | `attach_grants` | `LAYR8_ATTACH_GRANTS` | No | Attach Verifiable Grants to outbound messages. Default `True` |
 | `grant_cache_ms` | `LAYR8_GRANT_CACHE_MS` | No | How long held grants are cached. Default `60_000` |
@@ -475,6 +476,66 @@ The SDK will not pick identity credentials for you, and this is deliberate. The 
 | A credential with a non-empty `credentialSubject.scope` | Raises — that is a grant. Attached this way it would be routed as one, satisfy no `senderCredentials` requirement, and produce a denial identical to attaching nothing. Let the wallet handle grants. |
 
 An expired or revoked identity credential is **admitted** by the node today: validity is not checked on this input. Do not treat arrival as proof of currency.
+
+## Borrowing a parent's authority
+
+A join can name the identity whose authority its DID borrows. Set `parent_did`
+and leave `agent_did` empty, and the client joins as `<parent_did>:<segment>` —
+twelve characters of Crockford base32, generated once when the configuration is
+resolved, so a reconnect returns under the same DID.
+
+```python
+client = Client(Config(
+    node_url="wss://node.example.com/plugin_socket/websocket",
+    api_key=api_key,
+    parent_did="did:web:acme.example:users:alice",
+), on_error)
+```
+
+The node signs one credential for this DID per grant that parent holds and
+returns them in the join reply. There is nothing to select — everything the
+parent holds is delegated — and when `attach_grants` is on they are attached to
+outbound messages automatically.
+
+**The DID must be named beneath its parent**, exactly one further segment. Pass
+your own `agent_did` that is not, and `Client(...)` raises `Layr8Error` rather
+than writing a join the node would refuse. `did_namespace_of(parent)` returns
+the one API-key entry that admits every DID which may borrow from that parent.
+
+**Only a temporary identity may borrow.** A join that names a parent is sent
+with `storage: "ephemeral"`, overriding the rule that a fixed `agent_did` joins
+as a persistent twin: the node refuses `persistent` + `parentDid` with
+`e.join.plugin.child.storage-not-ephemeral`, and a borrowed DID is a fixed
+identity by construction, so without the override every borrowed join would be
+refused. The parent itself must be a persistent identity hosted by that node.
+
+**Read the status before the credentials.** `client.delegated_credentials()`
+returns a reading, not a list, and its answers are different things:
+
+| Reading | `supports_ephemeral_delegation()` | Meaning |
+|---|---|---|
+| `None` | `True` | This join named no parent |
+| `("complete", [])` | `True` | The parent's wallet was **read** and it holds no grants |
+| `("complete", [...])` | `True` | Read, and here is all of it |
+| `("partial", [...])` | `True` | Read, and some of it could **not** be delegated — there is more you did not get |
+| `("unread", [])` | `True` | The wallet could **not** be read; the empty list measures nothing |
+| `None` | `False` | The node predates delegation — it never looked |
+
+Reaching for `.credentials` without reading `.status` turns four of those rows
+into the second, and the second is the only one that is a measurement.
+
+**The credential exists nowhere but the join reply.** The node stores nothing
+about it, so `GET /api/v1/credentials` will never return it and no endpoint will
+hand it back; rejoin to be issued a new one. It is not individually revocable —
+authority is withdrawn by revoking or expiring the parent's grant.
+
+A refused join names its reason: `e.join.plugin.parent.not-persistent`,
+`e.join.plugin.parent.not-found`, `e.join.plugin.parent.not-hosted-here`,
+`e.join.plugin.child.not-beneath-parent`,
+`e.join.plugin.child.storage-not-ephemeral`,
+`e.join.plugin.child.already-persistent`. The node's reason names the code and
+reaches the caller as the message of the `Layr8ConnectionError` that `connect()`
+raises — this SDK does not swallow or rewrite it.
 
 ## Mediation (offline delivery)
 

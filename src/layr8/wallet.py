@@ -65,7 +65,7 @@ from __future__ import annotations
 import base64
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -366,6 +366,54 @@ class Wallet:
         )
         # did → (stamped_at_ms, credentials) or (stamped_at_ms, exception)
         self._cache: dict[str, tuple[float, list[HeldCredential] | Exception]] = {}
+        # Credentials handed to a DID in its join reply, which exist NOWHERE
+        # ELSE.
+        #
+        # An ephemeral DID's delegated credentials are not stored on the node —
+        # that is the point of them — so ``GET /api/v1/credentials`` returns
+        # nothing for such a DID, forever. Held apart from ``_cache`` for two
+        # reasons that both matter: they must not lapse on a TTL that exists to
+        # re-read a source that will never have them, and they must survive a
+        # failed read of that source.
+        self._delivered: dict[str, list[HeldCredential]] = {}
+
+    def seed_delivered(self, did: str, records: Sequence[Any]) -> None:
+        """Record what a join reply handed to *did*, REPLACING anything held before.
+
+        Replacing, not merging: the node mints a fresh set on every join, and
+        the previous set names credentials issued to a DID document that a
+        rejoin may have replaced. Keeping both would put dead credentials on the
+        wire and make the live one's slot under ``MAX_ATTACHED`` a matter of
+        ordering.
+
+        "A fresh set on every join" only holds if something calls this (or
+        :meth:`forget_delivered`) on every join. ``Client._apply_delegated`` is
+        that something, and it runs even when the reply carried no reading —
+        which is precisely when the previous set is most likely to be wrong.
+
+        An entry that does not parse as a grant is dropped here rather than at
+        send time, exactly as one read over REST is.
+        """
+        creds = [
+            c
+            for c in (
+                parse_credential({"credential_jwt": getattr(r, "credential_jwt", "")})
+                for r in records
+            )
+            if c is not None
+        ]
+        if creds:
+            self._delivered[did] = creds
+        else:
+            self._delivered.pop(did, None)
+
+    def forget_delivered(self, did: str) -> None:
+        """Forget what was delivered to *did* — a join that carried no reading."""
+        self._delivered.pop(did, None)
+
+    def delivered_to(self, did: str) -> list[HeldCredential]:
+        """The credentials a join reply handed to *did*."""
+        return list(self._delivered.get(did, ()))
 
     def refresh(self, did: str | None = None) -> None:
         """Drop the cached grants for *did* (or all), forcing the next re-read."""
@@ -407,7 +455,21 @@ class Wallet:
         on_capped: Callable[[dict[str, int]], None] | None = None,
     ) -> list[Attachment]:
         """The attachments for one outbound message, or ``[]`` if nothing covers it."""
-        creds = await self.held_by(did)
+        delivered = self._delivered.get(did, [])
+
+        # A failed read is still announced to the caller — via the raise — when
+        # it is the only source this DID has. When the join reply already handed
+        # us credentials, it is not: they exist independently of the node's
+        # credential endpoint, and dropping them because an unrelated read
+        # failed would withhold authority the node would have honoured.
+        try:
+            read = await self.held_by(did)
+        except Exception:
+            if not delivered:
+                raise
+            read = []
+
+        creds = read if not delivered else [*delivered, *read]
         return select_for(
             creds,
             recipients=recipients,

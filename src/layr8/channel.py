@@ -15,6 +15,7 @@ import websockets
 import websockets.asyncio.client
 
 from .backoff import Backoff
+from .delegated import DelegatedCredentialsReading, parse_delegated_credentials
 
 
 @dataclass
@@ -67,6 +68,11 @@ class PhoenixChannel:
         on_message: Callable[[Any], None],
         on_disconnect: Callable[[Exception], None] | None = None,
         on_reconnect: Callable[[], None] | None = None,
+        parent_did: str = "",
+        child_name_source: str = "",
+        on_delegated_credentials: Callable[
+            [str, DelegatedCredentialsReading | None], None
+        ] | None = None,
     ) -> None:
         self._ws_url = ws_url
         self._api_key = api_key
@@ -75,6 +81,17 @@ class PhoenixChannel:
         self._on_message = on_message
         self._on_disconnect = on_disconnect
         self._on_reconnect = on_reconnect
+        # Both are sent inside did_spec only when set, so a join that names no
+        # parent puts exactly the payload on the wire it put there before these
+        # existed. See layr8.child_did.
+        self._parent_did = parent_did
+        self._child_name_source = child_name_source
+        self._on_delegated_credentials = on_delegated_credentials
+        # None until a join reply that names a parent arrives. None is its own
+        # reading — "no reading" — and is never coerced into an empty complete
+        # one. See DelegatedCredentialsReading.
+        self._delegated: DelegatedCredentialsReading | None = None
+        self._ephemeral_delegation: bool = False
 
         self._ws: websockets.asyncio.client.ClientConnection | None = None
         self._ref_counter = 0
@@ -162,20 +179,48 @@ class PhoenixChannel:
         # dies with it, so messages sent while the agent was offline were
         # dropped at the node instead of queued. Only a node-assigned
         # per-session DID (blank agent_did) is ephemeral.
-        storage = "persistent" if self._agent_did else "ephemeral"
+        #
+        # EXCEPT when this DID borrows a parent's authority. Only a temporary
+        # identity may borrow: the node refuses a join that names a parent and
+        # declares "persistent" with
+        # `e.join.plugin.child.storage-not-ephemeral`. A borrowed DID is a
+        # fixed identity by construction — it is `<parent>:<segment>`, settled
+        # in resolve_config so a reconnect returns under the same name — so the
+        # rule above would send "persistent" for EVERY borrowed join and the
+        # node would refuse every one of them. A borrowed twin does not need
+        # persistence for the reason the rule exists either: its authority is
+        # re-minted on each join, and the parent, which the node requires to be
+        # persistent, is what survives.
+        if self._parent_did:
+            storage = "ephemeral"
+        else:
+            storage = "persistent" if self._agent_did else "ephemeral"
+
+        did_spec: dict[str, Any] = {
+            "mode": "Create",
+            "storage": storage,
+            "type": "plugin",
+            "verificationMethods": [
+                {"purpose": "authentication"},
+                {"purpose": "assertionMethod"},
+                {"purpose": "keyAgreement"},
+            ],
+        }
+        # Sent only when set, so a join that names no parent is byte for byte
+        # the payload this SDK sent before the field existed.
+        if self._parent_did:
+            did_spec["parentDid"] = self._parent_did
+        # Sent only when a parent was named and somebody therefore chose a
+        # borrower's name. An empty value is not sent at all, so "this client
+        # does not report it" stays a third answer rather than becoming "the
+        # caller chose it".
+        if self._child_name_source:
+            did_spec["childNameSource"] = self._child_name_source
+
         join_payload: dict[str, Any] = {
             "payload_types": protocols,
             "reply_protocol": True,
-            "did_spec": {
-                "mode": "Create",
-                "storage": storage,
-                "type": "plugin",
-                "verificationMethods": [
-                    {"purpose": "authentication"},
-                    {"purpose": "assertionMethod"},
-                    {"purpose": "keyAgreement"},
-                ],
-            },
+            "did_spec": did_spec,
         }
 
         loop = asyncio.get_running_loop()
@@ -203,6 +248,24 @@ class PhoenixChannel:
             self._assigned_did = response["did"]
         capabilities = response.get("capabilities", []) if isinstance(response, dict) else []
         self._reply_protocol = "reply_protocol/1" in capabilities
+        self._ephemeral_delegation = "ephemeral_delegation/1" in capabilities
+
+        # The node omits the key when the join named no parent, and otherwise
+        # sends a reading that says whether it could read the parent's wallet at
+        # all. Only a well-formed reading is a reading; `or []` here would be
+        # the bug this whole object exists to avoid.
+        raw_delegated = response.get("delegated_credentials") if isinstance(response, dict) else None
+        self._delegated = parse_delegated_credentials(raw_delegated)
+        # UNCONDITIONAL, None included. A rejoin whose reply carries no reading
+        # is a rejoin after which the previous set must go: it was minted for a
+        # DID document this rejoin may have replaced, and the node that would
+        # have re-minted it did not. Firing only when there is something to hand
+        # over leaves the wallet attaching the last join's credentials while
+        # delegated_credentials reports there are none.
+        if self._on_delegated_credentials is not None:
+            self._on_delegated_credentials(
+                self._agent_did or self._assigned_did, self._delegated
+            )
 
     async def send(self, event: str, payload: Any) -> ServerReply:
         """Send a Phoenix Channel event and wait for server reply."""
@@ -237,6 +300,16 @@ class PhoenixChannel:
     @property
     def reply_protocol(self) -> bool:
         return self._reply_protocol
+
+    @property
+    def delegated_credentials(self) -> DelegatedCredentialsReading | None:
+        """What the last join learned about the parent's wallet, or ``None``."""
+        return self._delegated
+
+    @property
+    def supports_ephemeral_delegation(self) -> bool:
+        """Whether the node advertised ``ephemeral_delegation/1`` at join."""
+        return self._ephemeral_delegation
 
     async def close(self) -> None:
         """Send phx_leave and shut down gracefully."""
