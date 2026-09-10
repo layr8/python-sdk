@@ -440,6 +440,34 @@ Attachment(
 
 Attachments you supply are never displaced. The single exception is [identity credentials](#identity-credentials), which are appended to rather than displacing the wallet's selection: they answer a different question.
 
+### Reading an attachment: `lastmod_time`, and a header that was not read
+
+`Attachment.lastmod_time` is `int | str | None`, and this SDK does not interpret it.
+
+DIDComm v2 states **no type** for the field. Its Attachments section says only "OPTIONAL. A hint about when the content in this attachment was last modified", while the same document pins `created_time` and `expires_time` to "UTC Epoch Seconds (seconds since 1970-01-01T00:00:00Z) as an integer". The authors knew how to spell "epoch integer" and did not spell it here, so a receiver is not entitled to demand one. This SDK writes epoch seconds, and reads whatever arrives — an integer or a timestamp string — unchanged.
+
+The annotation used to say `int`, which let a type checker approve arithmetic on a value that was in fact a `str`. Narrow before you read it:
+
+```python
+t = att.lastmod_time
+if isinstance(t, int):
+    when = datetime.fromtimestamp(t, tz=timezone.utc)
+elif isinstance(t, str):
+    when = datetime.fromisoformat(t.replace("Z", "+00:00"))
+else:
+    when = None   # the sender sent no hint
+```
+
+`Message.attachments` has **three** states, because "this message carried none" and "nobody could read the header" are different answers and a reader that folds them reports a measurement that was never taken:
+
+| the message carried | `attachments` | `attachments_unread` |
+| --- | --- | --- |
+| no `attachments` header | `[]` | `None` |
+| a header this SDK read | the attachments | `None` |
+| a header it could not read | `None` | why |
+
+The message itself is delivered in all three cases. An authorization denial must not disappear because a hint travelling beside it was malformed — being refused and being ignored are different events, and a caller waiting on `request()` sees the difference as a denial versus a timeout.
+
 ## Identity credentials
 
 A **grant** says what the sender may do. An **identity credential** says *who the sender is* — that it works for a particular company, holds a licence, is over eighteen. The cloud-node keeps them apart on one test, `credentialSubject.scope`: with a scope it is a grant; without one it is an identity credential and lands in the policy input a grant's `senderCredentials` requirement reads.
