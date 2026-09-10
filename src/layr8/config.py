@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from .child_did import ChildNameSource, resolve_borrower_did
 from .errors import Layr8Error
 
 #: Default grant cache TTL. Short: a grant minted seconds ago is invisible until
@@ -81,6 +82,31 @@ class Config:
     agent_did: str = ""
     protocols: list[str] | None = None
 
+    #: The DID whose authority this DID borrows. Optional; omitting it is the
+    #: behaviour that existed before this field, byte for byte on the wire.
+    #:
+    #: The node REFUSES a join whose parent is not a persistent identity it
+    #: hosts, with ``e.join.plugin.parent.not-persistent``,
+    #: ``e.join.plugin.parent.not-found`` or
+    #: ``e.join.plugin.parent.not-hosted-here``. An ephemeral DID is deleted
+    #: once its holder has been disconnected for the node's TTL, so a parent
+    #: that can be swept away would leave a child that nobody can withdraw and
+    #: nobody can keep.
+    #:
+    #: Naming an accepted parent causes the node to sign one credential for
+    #: this DID per grant that parent holds, and to return them in the join
+    #: reply (:meth:`Client.delegated_credentials`). There is NOTHING to
+    #: select: everything the parent holds is delegated. That is why there is
+    #: no companion field naming a role — a node refuses a join that carries
+    #: one rather than ignoring it.
+    #:
+    #: The DID that names a parent must be named BENEATH it —
+    #: ``<parent_did>:<segment>`` — and the node refuses one that is not, with
+    #: ``e.join.plugin.child.not-beneath-parent``. Leave *agent_did* empty and
+    #: this SDK generates a conforming name; see :mod:`layr8.child_did` for the
+    #: rule and why the shape is fixed.
+    parent_did: str = ""
+
     #: Attach the Verifiable Grants covering each outbound message. Default
     #: ``True``.
     #:
@@ -130,6 +156,21 @@ class ResolvedConfig:
     api_key: str
     agent_did: str
     protocols: list[str]
+    #: The parent whose authority *agent_did* borrows, or ``""``.
+    parent_did: str = ""
+    #: Who chose the segment of *agent_did*: ``"sdk"`` when this library
+    #: generated it, ``"client"`` when the caller supplied the whole DID.
+    #:
+    #: Settled by :func:`resolve_config`; there is no reason for a caller to
+    #: set it. It is on the wire because a generated name and a hand-built one
+    #: that conforms are otherwise identical bytes, and the node's log would
+    #: then be unable to say whether a malformed borrower DID came from this
+    #: library or from a caller.
+    #:
+    #: ``""`` is *not stated* — a join naming no parent at all. It is never
+    #: read as ``"client"``, which would claim a caller chose a name when
+    #: nothing measured that.
+    child_name_source: ChildNameSource | str = ""
     attach_grants: bool = True
     grant_cache_ms: float = DEFAULT_GRANT_CACHE_MS
     grant_read_timeout_ms: float = DEFAULT_GRANT_READ_TIMEOUT_MS
@@ -164,11 +205,21 @@ def resolve_config(cfg: Config) -> ResolvedConfig:
 
     protocols = list(cfg.protocols) if cfg.protocols else []
 
+    # A DID that names a parent has to be named beneath it. Settled HERE rather
+    # than at join time, so that *agent_did* — which the wallet, the ``from`` of
+    # every outbound message and :attr:`Client.did` all read — is the DID the
+    # join actually uses. Deriving it later would leave those reading an empty
+    # string while the socket spoke as somebody. Settled ONCE, so a reconnect
+    # returns under the same DID and the node re-mints its credentials for it.
+    borrower = resolve_borrower_did(agent_did, cfg.parent_did)
+
     return ResolvedConfig(
         node_url=node_url,
         api_key=api_key,
-        agent_did=agent_did,
+        agent_did=borrower.did,
         protocols=protocols,
+        parent_did=cfg.parent_did,
+        child_name_source=borrower.child_name_source,
         attach_grants=_resolve_bool(
             cfg.attach_grants, os.environ.get("LAYR8_ATTACH_GRANTS"), True
         ),

@@ -4,6 +4,93 @@ All notable changes to `layr8`. Format loosely follows [Keep a Changelog](https:
 
 This file starts here. Earlier releases are recorded only in git history.
 
+## [Unreleased]
+
+### Added
+
+- **A join can name the parent whose authority its DID borrows, and this SDK
+  derives the name.** `Config.parent_did` is optional and is sent only when set,
+  so a join that names no parent puts exactly the payload on the wire it did
+  before — asserted byte for byte in `tests/test_borrowed_did.py`. Pass
+  `parent_did` and leave `agent_did` empty, and the client joins as
+  `<parent_did>:<segment>`: twelve characters of Crockford base32 from
+  `secrets`, generated once when the configuration is resolved, so a reconnect
+  returns under the same DID and the node re-mints the same credentials for it.
+
+  **The reason the shape is fixed:** a cloud-node API key restricts which DIDs
+  it may bind, and an entry is either an exact DID or a prefix with a trailing
+  `*`. While a borrower's name was unrelated to its parent — and generated per
+  connection — no entry could be written for it in advance, so the only key that
+  admitted a borrower was one with *no restrictions at all*, which admits every
+  DID on the node. Named beneath its parent, one key carrying the parent and
+  `did_namespace_of(parent)` admits the parent and its borrowers and nothing
+  else.
+
+  A caller that supplies its own `agent_did` that is **not** named beneath the
+  parent gets a `Layr8Error` from `Client(...)`, before anything is written: the
+  node refuses that join with `e.join.plugin.child.not-beneath-parent`, and a
+  refusal at connect time in production is the expensive way to learn this.
+
+  New exports: `parent_did`, `did_namespace_of`, `is_beneath_parent`,
+  `random_child_segment`, `resolve_borrower_did`, `CHILD_SEGMENT_LENGTH`,
+  `ChildNameSource`.
+
+  `did_spec.childNameSource` is sent alongside `parentDid` — `"sdk"` when this
+  library generated the segment, `"client"` when the caller supplied the whole
+  DID, and the key is **absent** when neither applies. A generated name and a
+  hand-built one that conforms are otherwise identical bytes, so without it a
+  malformed borrower DID could not be told apart as this library's defect from a
+  caller's typo. The absent case is never folded into `"client"`.
+
+- **The join reply carries the credentials the node signed for this DID.**
+  `Client.delegated_credentials()` returns a `DelegatedCredentialsReading` —
+  `status` and `credentials` — with one entry per grant the named parent holds.
+  The node signs them at join, narrowed to no more than the parent carries and
+  citing it in `credentialSubject.delegation.parentCapability`. When
+  `attach_grants` is on they are attached to outbound messages automatically;
+  there is nothing to wire up.
+
+  **Four readings from that method, and six with
+  `Client.supports_ephemeral_delegation()`. Collapsing any pair reports
+  something nobody measured.**
+
+  | `delegated_credentials()` | `supports_ephemeral_delegation()` | Meaning |
+  |---|---|---|
+  | `None` | `True` | the join named no parent |
+  | `("complete", [])` | `True` | the parent's wallet was **read** and it grants nothing |
+  | `("complete", [...])` | `True` | read, and here is all of it |
+  | `("partial", [...])` | `True` | read, and some of it could not be delegated — there is more you did not get |
+  | `("unread", [])` | `True` | the wallet could **not** be read; the `[]` measures nothing |
+  | `None` | `False` | the node never looked |
+
+  Anything that is not a well-formed reading — absent, a bare list from an older
+  node, an unknown status — is `None`, never an empty `complete` one: that would
+  state that a wallet was read and grants nothing, which is the one thing none
+  of those inputs says.
+
+  A reading arrives on **every** join and rejoin, including one that carries no
+  reading at all — that clears whatever the previous join seeded, because the
+  node mints a fresh set per join and the previous set names a DID document a
+  rejoin may have replaced.
+
+  **The credential exists nowhere but the join reply.** The node stores nothing
+  about it, so `GET /api/v1/credentials` will never return it; rejoin to be
+  issued a new one. It is not individually revocable — authority is withdrawn by
+  revoking or expiring the parent's grant. Because that endpoint is not their
+  source, a failed read of it no longer withholds them from a message they
+  cover.
+
+### Changed
+
+- **A join that names a parent is sent with `storage: "ephemeral"`**, overriding
+  the rule added in 0.2.15 that a fixed `agent_did` joins as a persistent twin.
+  Only a temporary identity may borrow authority: the node refuses `persistent`
+  + `parentDid` with `e.join.plugin.child.storage-not-ephemeral`. A borrowed DID
+  is a fixed `agent_did` by construction — it is `<parent>:<segment>`, settled
+  once so a reconnect returns under the same name — so without this override
+  every borrowed join would have been refused. A join that names no parent is
+  unaffected.
+
 ## [0.2.15] - 2026-09-09
 
 ### Fixed

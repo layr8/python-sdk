@@ -30,6 +30,7 @@ from .message import Message, generate_id, marshal_didcomm, parse_didcomm
 from .sentinel import _Pass
 from .presentations import VerifiedPresentation
 from .rest import RestClient, rest_url_from_websocket
+from .delegated import DelegatedCredentialsReading
 from .wallet import Wallet, rest_credential_reader
 
 _PROBLEM_REPORT_TYPE = "https://didcomm.org/report-problem/2.0/problem-report"
@@ -323,6 +324,9 @@ class Client:
             on_message=self._handle_inbound_message,
             on_disconnect=self._on_disconnect,
             on_reconnect=self._on_reconnect,
+            parent_did=self._cfg.parent_did,
+            child_name_source=self._cfg.child_name_source,
+            on_delegated_credentials=self._apply_delegated,
         )
 
         await channel.connect(protocols)
@@ -333,6 +337,63 @@ class Client:
         self._channel = channel
         self._connected = True
         self._start_mediation()
+
+    def delegated_credentials(self) -> DelegatedCredentialsReading | None:
+        """What the last join learned about the parent's wallet, and what came back.
+
+        **Four readings from this method, and six with**
+        :meth:`supports_ephemeral_delegation` — they are deliberately not two.
+        Collapsing any pair reports something nobody measured:
+
+        =============================== ================================= ==========================================================
+        ``delegated_credentials()``     ``supports_ephemeral_delegation`` Meaning
+        =============================== ================================= ==========================================================
+        ``None``                        ``True``                          this join named no parent, so nothing was delegated
+        ``("complete", [])``            ``True``                          the parent's wallet was **read** and it holds no grants
+        ``("complete", [...])``         ``True``                          read, and here is all of it
+        ``("partial", [...])``          ``True``                          read, and some of it could not be delegated
+        ``("unread", [])``              ``True``                          the wallet could **not** be read; the ``[]`` measures nothing
+        ``None``                        ``False``                         the node predates delegation — it never looked
+        =============================== ================================= ==========================================================
+
+        Do not reach for ``.credentials`` without reading ``.status``: that
+        turns four of those rows into the second, and the second is the only
+        one of them that is a measurement.
+
+        A fresh reading replaces the old one on every rejoin, because the node
+        mints a fresh set per join — including a rejoin that comes back with no
+        reading at all, which clears it.
+
+        The credentials are attached to outbound messages automatically when
+        *attach_grants* is on; there is nothing to wire up.
+        """
+        return self._channel.delegated_credentials if self._channel else None
+
+    def supports_ephemeral_delegation(self) -> bool:
+        """Whether the node advertised ``ephemeral_delegation/1`` at join.
+
+        Without it, a ``None`` from :meth:`delegated_credentials` means the node
+        never looked — not that the parent holds nothing.
+        """
+        return self._channel.supports_ephemeral_delegation if self._channel else False
+
+    def _apply_delegated(
+        self, did: str, reading: DelegatedCredentialsReading | None
+    ) -> None:
+        """Hand a join reply's credentials to the wallet, or clear the last set.
+
+        Runs on EVERY join and rejoin, ``None`` included. That is what makes "a
+        fresh set on every join" true: the node mints a new set per join, and
+        the previous set names credentials issued to a DID document a rejoin may
+        have replaced.
+        """
+        if self._wallet is None:
+            return
+        holder = did or self._agent_did
+        if reading is None:
+            self._wallet.forget_delivered(holder)
+            return
+        self._wallet.seed_delivered(holder, reading.credentials)
 
     async def close(self) -> None:
         """Gracefully shut down the client connection."""

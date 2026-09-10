@@ -1,7 +1,20 @@
 """Layr8 DIDComm Agent SDK for Python."""
 
+from .child_did import (
+    CHILD_SEGMENT_LENGTH,
+    ChildNameSource,
+    did_namespace_of,
+    is_beneath_parent,
+    random_child_segment,
+    resolve_borrower_did,
+)
 from .client import Client
 from .config import Config, GrantMissInfo
+from .delegated import (
+    DelegatedCredential,
+    DelegatedCredentialsReading,
+    DelegationStatus,
+)
 from .credentials import Credential, StoredCredential, VerifiedCredential
 from .errors import (
     AlreadyConnectedError,
@@ -45,6 +58,15 @@ __all__ = [
     "Client",
     "Config",
     "GrantMissInfo",
+    "CHILD_SEGMENT_LENGTH",
+    "ChildNameSource",
+    "did_namespace_of",
+    "is_beneath_parent",
+    "random_child_segment",
+    "resolve_borrower_did",
+    "DelegatedCredential",
+    "DelegatedCredentialsReading",
+    "DelegationStatus",
     "Wallet",
     "HeldCredential",
     "SpaceWatcher",
