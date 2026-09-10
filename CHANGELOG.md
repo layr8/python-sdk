@@ -6,6 +6,8 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ## [Unreleased]
 
+## [0.2.16] - 2026-09-10
+
 ### Added
 
 - **A join can name the parent whose authority its DID borrows, and this SDK
@@ -217,6 +219,7 @@ This file starts here. Earlier releases are recorded only in git history.
 - `RestClient.__init__` takes an optional `timeout_ms`. Additive; existing
   positional calls are unaffected.
 
+[0.2.16]: https://github.com/layr8/python-sdk/releases/tag/v0.2.16
 [0.2.15]: https://github.com/layr8/python-sdk/releases/tag/v0.2.15
 [0.2.14]: https://github.com/layr8/python-sdk/releases/tag/v0.2.14
 [0.2.13]: https://github.com/layr8/python-sdk/releases/tag/v0.2.13
