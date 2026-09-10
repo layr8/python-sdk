@@ -6,6 +6,44 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ## [Unreleased]
 
+### Changed
+
+- **`Attachment.lastmod_time` is `int | str | None`, not `int | None`.** DIDComm
+  v2 states no type for the field: its Attachments section says only "OPTIONAL. A
+  hint about when the content in this attachment was last modified", while the
+  same document pins `created_time` and `expires_time` to "UTC Epoch Seconds
+  (seconds since 1970-01-01T00:00:00Z) as an integer". The omission is visible
+  rather than accidental, so a receiver is not entitled to demand an integer.
+  Senders have put both an integer and an RFC 3339 string on the wire.
+
+  Nothing converted the value before and nothing converts it now — this SDK
+  passes the hint through in both directions. What changes is the annotation,
+  which used to approve `att.lastmod_time + 60` on a value that was in fact a
+  `str`. A reader that wants a number now has to narrow, and `tests/
+  test_message_lastmod_time.py` asserts the three forms — absent, integer,
+  string — stay three distinct values. It also asserts the annotation itself, so
+  narrowing the field back fails here rather than in a caller: Python does not
+  enforce an annotation at runtime, and every other test in this file passes
+  with the field declared `int`.
+
+- **`Message.attachments` is `None` when the `attachments` header could not be
+  read**, with the reason in the new `Message.attachments_unread`. An absent
+  header still reads as `[]`. Returning `[]` for a header nobody decoded would
+  report "this message carried no attachments", which is a measurement that was
+  never taken.
+
+### Fixed
+
+- **An undecodable attachment no longer costs the caller the message.** An
+  `attachments` header that was not a list, an entry that was not an object, or
+  an attachment whose `data` was not an object raised out of `parse_didcomm`;
+  the client reported a parse failure and dropped the message before routing.
+  A caller waiting on `request()` then heard nothing until its own timeout, so
+  a refusal arrived as silence. Attachments are now decoded in a second pass:
+  the message is delivered, and the header it could not read is reported as
+  unread. `Mediation`'s live-delivery handler no longer raises on such a
+  message either.
+
 ## [0.2.16] - 2026-09-10
 
 ### Added

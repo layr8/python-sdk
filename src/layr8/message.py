@@ -36,13 +36,45 @@ class AttachmentData:
 
 @dataclass
 class Attachment:
-    """A DIDComm v2 attachment."""
+    """
+    A DIDComm v2 attachment.
+
+    ``lastmod_time`` is ``int | str``, and this SDK does not interpret it.
+
+    DIDComm v2 states no type for the field. Its Attachments section says
+    only "OPTIONAL. A hint about when the content in this attachment was
+    last modified", while the same document pins ``created_time`` and
+    ``expires_time`` to "UTC Epoch Seconds (seconds since
+    1970-01-01T00:00:00Z) as an integer". The authors knew how to spell
+    "epoch integer" and did not spell it here, so a receiver is not
+    entitled to demand one. Epoch seconds are what this SDK writes and
+    what the ecosystem mostly sends; an RFC 3339 string has also been seen
+    on the wire. Both arrive here unchanged.
+
+    This annotation used to say ``int``, which let a type checker approve
+    ``att.lastmod_time + 60`` on a value that was in fact a string. Read
+    it by narrowing::
+
+        t = att.lastmod_time
+        if isinstance(t, int):
+            when = datetime.fromtimestamp(t, tz=timezone.utc)
+        elif isinstance(t, str):
+            when = datetime.fromisoformat(t.replace("Z", "+00:00"))
+        else:
+            when = None   # the sender sent no hint
+
+    Absent, integer and string are three different values and stay three
+    different values. Nothing here folds an unhelpful hint into ``None``:
+    "the sender sent no hint" and "the sender sent one I have to narrow"
+    are not the same fact.
+    """
+
     id: str = ""
     description: str = ""
     filename: str = ""
     media_type: str = ""
     format: str = ""
-    lastmod_time: int | None = None
+    lastmod_time: int | str | None = None
     byte_count: int | None = None
     data: AttachmentData = field(default_factory=AttachmentData)
 
@@ -54,6 +86,22 @@ class Message:
 
     Note: The ``from`` field is named ``from_`` because ``from`` is a Python
     reserved word. On the wire, it serializes as ``"from"``.
+
+    ``attachments`` has three states, and they are three different values:
+
+    ==========================  =====================  ==================
+    the message carried         ``attachments``        ``attachments_unread``
+    ==========================  =====================  ==================
+    no ``attachments`` header   ``[]``                 ``None``
+    a header this SDK read      the attachments        ``None``
+    a header it could not read  ``None``               why
+    ==========================  =====================  ==================
+
+    Returning ``[]`` for a header nobody could read would report "this
+    message carried no attachments", which is a measurement that was never
+    taken. The message is still delivered either way: an authorization
+    denial must not vanish because a hint travelling beside it was
+    malformed.
     """
 
     id: str = ""
@@ -63,7 +111,8 @@ class Message:
     thread_id: str = ""
     parent_thread_id: str = ""
     body: Any = None
-    attachments: list[Attachment] = field(default_factory=list)
+    attachments: list[Attachment] | None = field(default_factory=list)
+    attachments_unread: str | None = None
     context: MessageContext | None = None
 
     # Internal fields (not part of the public API)
@@ -120,9 +169,17 @@ def _marshal_attachment(att: Attachment) -> dict[str, Any]:
     return d
 
 
+class _UnreadAttachments(Exception):
+    """The ``attachments`` header could not be decoded. Internal to this module."""
+
+
 def _parse_attachment(raw: dict[str, Any]) -> Attachment:
     """Parse a wire-format dict into an Attachment."""
     data_raw = raw.get("data", {})
+    if not isinstance(data_raw, dict):
+        raise _UnreadAttachments(
+            f"attachment data is {type(data_raw).__name__}, expected an object"
+        )
     data = AttachmentData(
         base64=data_raw.get("base64", ""),
         json=data_raw.get("json"),
@@ -140,6 +197,37 @@ def _parse_attachment(raw: dict[str, Any]) -> Attachment:
         byte_count=raw.get("byte_count"),
         data=data,
     )
+
+
+def _parse_attachments(raw: Any) -> tuple[list[Attachment] | None, str | None]:
+    """
+    Decode the ``attachments`` header, and never fail the message for it.
+
+    Returns ``(attachments, unread_reason)``. An absent header is a header
+    that was read and carried nothing, so it returns ``([], None)``; a
+    header that could not be decoded returns ``(None, reason)``. The two
+    must not share a value — see ``Message``.
+
+    The whole header is read or not read together. Handing back the
+    attachments that happened to decode, with no word about the one that
+    did not, would silently drop a credential.
+    """
+    if raw is None:
+        return [], None
+    if not isinstance(raw, list):
+        return None, f"attachments header is {type(raw).__name__}, expected a list"
+
+    out: list[Attachment] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return None, f"attachment {i} is {type(item).__name__}, expected an object"
+        try:
+            out.append(_parse_attachment(item))
+        except _UnreadAttachments as exc:
+            return None, f"attachment {i}: {exc}"
+        except Exception as exc:  # noqa: BLE001 - a hint never costs the message
+            return None, f"attachment {i}: {type(exc).__name__}: {exc}"
+    return out, None
 
 
 def marshal_didcomm(msg: Message) -> dict[str, Any]:
@@ -164,7 +252,7 @@ def parse_didcomm(data: dict[str, Any]) -> Message:
     """Parse an inbound cloud-node message (context + plaintext) into a Message."""
     pt = data.get("plaintext", {})
 
-    attachments = [_parse_attachment(a) for a in pt.get("attachments", [])]
+    attachments, attachments_unread = _parse_attachments(pt.get("attachments"))
 
     msg = Message(
         id=pt.get("id", ""),
@@ -175,6 +263,7 @@ def parse_didcomm(data: dict[str, Any]) -> Message:
         parent_thread_id=pt.get("pthid", ""),
         body=pt.get("body"),
         attachments=attachments,
+        attachments_unread=attachments_unread,
         _body_raw=pt.get("body"),
     )
 

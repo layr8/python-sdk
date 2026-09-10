@@ -355,7 +355,10 @@ def delivery_handler(client: Client) -> HandlerFn:
     """
 
     async def handle(msg: Message) -> None:
-        await collect(client, msg.from_, list(msg.attachments))
+        # `attachments` is None when the header could not be read. Re-inject
+        # what there is; there is nothing to re-inject from a header nobody
+        # decoded, and `list(None)` would raise here instead.
+        await collect(client, msg.from_, list(msg.attachments or []))
         return None
 
     return handle
