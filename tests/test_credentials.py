@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import re
 from typing import Any
 
 import pytest
@@ -114,6 +116,105 @@ class TestSignCredential:
                 await client._rest.close()
         finally:
             await server.close()
+
+
+_URN_UUID = re.compile(r"^urn:uuid:[0-9a-f-]{36}$")
+_OTHER_ISSUER = "did:web:other.localhost:other-agent"
+
+
+async def _sign_and_capture(
+    cred: Credential, **kwargs: Any
+) -> dict[str, Any]:
+    """Sign ``cred`` against a mock node and return the request body it received."""
+    captured: dict[str, Any] = {}
+
+    async def handler(request: web.Request) -> web.Response:
+        captured["body"] = await request.json()
+        return web.json_response({"signed_credential": "signed"})
+
+    app = web.Application()
+    app.router.add_post("/api/v1/credentials/sign", handler)
+    server = await _start_server(app)
+    try:
+        client = _make_client(server.port)
+        try:
+            await client.sign_credential(cred, **kwargs)
+        finally:
+            await client._rest.close()
+    finally:
+        await server.close()
+    return captured["body"]
+
+
+class TestSignCredentialFillsRequiredFields:
+    """The node requires ``id`` and ``issuer``; the SDK declares both optional."""
+
+    async def test_missing_id_and_issuer_are_both_filled(self) -> None:
+        cred = Credential(credential_subject={"weight_kg": 12})
+        before = copy.deepcopy(cred)
+
+        body = await _sign_and_capture(cred)
+
+        sent = body["credential"]
+        assert sent["issuer"] == AGENT_DID
+        assert _URN_UUID.match(sent["id"]), sent["id"]
+        assert sent["credentialSubject"] == {"weight_kg": 12}
+        assert cred == before
+
+    async def test_given_id_is_kept_and_issuer_is_filled(self) -> None:
+        cred = Credential(id="urn:example:ticket-1", credential_subject={"a": 1})
+        before = copy.deepcopy(cred)
+
+        body = await _sign_and_capture(cred)
+
+        sent = body["credential"]
+        assert sent["id"] == "urn:example:ticket-1"
+        assert sent["issuer"] == AGENT_DID
+        assert cred == before
+
+    async def test_given_issuer_is_kept_and_id_is_filled(self) -> None:
+        cred = Credential(issuer=_OTHER_ISSUER, credential_subject={"a": 1})
+        before = copy.deepcopy(cred)
+
+        body = await _sign_and_capture(cred)
+
+        sent = body["credential"]
+        assert sent["issuer"] == _OTHER_ISSUER
+        assert _URN_UUID.match(sent["id"]), sent["id"]
+        assert body["issuer_did"] == AGENT_DID
+        assert cred == before
+
+    async def test_given_id_and_issuer_are_both_kept(self) -> None:
+        cred = Credential(
+            id="urn:example:ticket-2",
+            issuer=_OTHER_ISSUER,
+            credential_subject={"a": 1},
+        )
+        before = copy.deepcopy(cred)
+
+        body = await _sign_and_capture(cred)
+
+        sent = body["credential"]
+        assert sent["id"] == "urn:example:ticket-2"
+        assert sent["issuer"] == _OTHER_ISSUER
+        assert cred == before
+
+    async def test_filled_issuer_follows_the_issuer_did_override(self) -> None:
+        cred = Credential(credential_subject={"a": 1})
+
+        body = await _sign_and_capture(cred, issuer_did=_OTHER_ISSUER)
+
+        assert body["credential"]["issuer"] == _OTHER_ISSUER
+        assert body["issuer_did"] == _OTHER_ISSUER
+
+    async def test_each_call_gets_a_distinct_id(self) -> None:
+        cred = Credential(credential_subject={"a": 1})
+
+        first = await _sign_and_capture(cred)
+        second = await _sign_and_capture(cred)
+
+        assert first["credential"]["id"] != second["credential"]["id"]
+        assert cred.id == ""
 
 
 class TestVerifyCredential:

@@ -34,6 +34,17 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ### Fixed
 
+- **`Client.sign_credential` fills an empty `id` and `issuer` before sending.**
+  The node refuses a credential that lacks either field with HTTP 422 "Invalid
+  credential: missing required fields", and does not say which one is missing,
+  while `Credential` declares both optional with an empty default. A credential
+  built with only `credential_subject` could therefore never be signed. The
+  request body now carries `issuer` set to the DID the credential is signed with
+  (the `issuer_did` argument, else the agent DID) and `id` set to a new
+  `urn:uuid:<uuid4>`. A value the caller set is sent unchanged, and the caller's
+  `Credential` instance is not modified. The Node, Go and Elixir SDKs make the
+  same change.
+
 - **An undecodable attachment no longer costs the caller the message.** An
   `attachments` header that was not a list, an entry that was not an object, or
   an attachment whose `data` was not an object raised out of `parse_didcomm`;
