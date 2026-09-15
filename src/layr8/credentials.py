@@ -11,6 +11,11 @@ class Credential:
     """A W3C Verifiable Credential for signing.
 
     The ``context`` field maps to ``@context`` in the JSON payload.
+
+    ``id`` and ``issuer`` may be left empty. The node requires both, so
+    :meth:`Client.sign_credential` fills them in the request it sends:
+    ``issuer`` with the DID used to sign, ``id`` with a new
+    ``urn:uuid:<uuid4>``. Values set here are sent as given.
     """
 
     credential_subject: dict[str, Any] = field(default_factory=dict)

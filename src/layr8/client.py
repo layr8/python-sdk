@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
@@ -900,6 +901,14 @@ class Client:
 
         Uses the issuer DID's assertion key from the local wallet.
 
+        The node refuses a credential without ``id`` or ``issuer`` (HTTP 422,
+        "missing required fields", without naming which). Both are optional on
+        :class:`Credential`, so this method fills them in the request body when
+        they are empty: ``issuer`` becomes the DID the credential is signed
+        with (``issuer_did``, else the agent DID) and ``id`` becomes a fresh
+        ``urn:uuid:<uuid4>``. A value the caller set is sent unchanged, and the
+        caller's ``Credential`` instance is never modified.
+
         Args:
             credential: The credential to sign.
             issuer_did: Override the issuer DID (defaults to ``self.did``).
@@ -908,9 +917,15 @@ class Client:
         Returns:
             The signed credential string.
         """
+        signing_did = issuer_did or self._agent_did
+        payload = credential.to_dict()
+        if not payload.get("issuer"):
+            payload["issuer"] = signing_did
+        if not payload.get("id"):
+            payload["id"] = f"urn:uuid:{uuid.uuid4()}"
         body: dict[str, Any] = {
-            "credential": credential.to_dict(),
-            "issuer_did": issuer_did or self._agent_did,
+            "credential": payload,
+            "issuer_did": signing_did,
             "format": format,
         }
         result = await self._rest.post("/api/v1/credentials/sign", body)
