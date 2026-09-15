@@ -6,7 +6,13 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-15
+
 ### Changed
+
+Both entries below change an existing API, so this release is a minor, not a
+patch (RELEASING.md, "Choosing the version"). The Go SDK shipped the same
+`lastmod_time` change as a breaking one in v0.2.0.
 
 - **`Attachment.lastmod_time` is `int | str | None`, not `int | None`.** DIDComm
   v2 states no type for the field: its Attachments section says only "OPTIONAL. A
@@ -268,6 +274,7 @@ This file starts here. Earlier releases are recorded only in git history.
 - `RestClient.__init__` takes an optional `timeout_ms`. Additive; existing
   positional calls are unaffected.
 
+[0.3.0]: https://github.com/layr8/python-sdk/releases/tag/v0.3.0
 [0.2.16]: https://github.com/layr8/python-sdk/releases/tag/v0.2.16
 [0.2.15]: https://github.com/layr8/python-sdk/releases/tag/v0.2.15
 [0.2.14]: https://github.com/layr8/python-sdk/releases/tag/v0.2.14
