@@ -6,6 +6,8 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-16
+
 ### Added
 
 - **A borrowed child's delegated set is kept current while it is connected.**
@@ -313,6 +315,7 @@ patch (RELEASING.md, "Choosing the version"). The Go SDK shipped the same
 - `RestClient.__init__` takes an optional `timeout_ms`. Additive; existing
   positional calls are unaffected.
 
+[0.3.2]: https://github.com/layr8/python-sdk/releases/tag/v0.3.2
 [0.3.1]: https://github.com/layr8/python-sdk/releases/tag/v0.3.1
 [0.3.0]: https://github.com/layr8/python-sdk/releases/tag/v0.3.0
 [0.2.16]: https://github.com/layr8/python-sdk/releases/tag/v0.2.16
