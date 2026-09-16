@@ -16,7 +16,9 @@ This file starts here. Earlier releases are recorded only in git history.
   ignores a push whose `revision` is not newer than the one it holds, ignores a
   push that does not parse (and an `unread` push, which the node never sends),
   and calls `on_delegation(did, reading)`. A rejoin starts the revision again
-  from the join reply.
+  from the join reply. A push that arrives while a join is waiting for its
+  reply is held until the join has installed its reading, then applied in
+  order, so it is neither dropped nor overwritten by the older join reading.
 - `Client.supports_ephemeral_delegation_refresh()`, `Client.on_delegation()`,
   `layr8.DELEGATION_REFRESH_CAPABILITY` and
   `layr8.delegated.parse_delegation_push()`.

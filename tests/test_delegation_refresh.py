@@ -58,6 +58,9 @@ class RefreshNode:
         self.capabilities = ["ephemeral_delegation/1", REFRESH]
         self.join_reading: dict[str, Any] | None = reading(0, "complete", "p1")
         self.topic = ""
+        # When set, every join reply is followed by this push, sent from the
+        # same task with nothing awaited in between that the client could use.
+        self.push_after_join: dict[str, Any] | None = None
 
     async def start(self) -> None:
         await self.server.start()
@@ -68,10 +71,19 @@ class RefreshNode:
                 response: dict[str, Any] = {"did": CHILD, "capabilities": self.capabilities}
                 if self.join_reading is not None:
                     response["delegated_credentials"] = self.join_reading
-                asyncio.ensure_future(self.server.send_to_client(
-                    msg["ref"], msg["ref"], msg["topic"], "phx_reply",
-                    {"status": "ok", "response": response},
-                ))
+                behind = self.push_after_join
+
+                async def reply() -> None:
+                    await self.server.send_to_client(
+                        msg["ref"], msg["ref"], msg["topic"], "phx_reply",
+                        {"status": "ok", "response": response},
+                    )
+                    if behind is not None:
+                        await self.server.send_to_client(
+                            None, None, msg["topic"], "delegated_credentials", behind
+                        )
+
+                asyncio.ensure_future(reply())
             elif msg["ref"]:
                 asyncio.ensure_future(self.server.send_to_client(
                     None, msg["ref"], msg["topic"], "phx_reply",
@@ -322,3 +334,154 @@ def test_pushed_readings_are_pairwise_distinct_and_unread_is_not_one() -> None:
     assert complete_empty is not None and complete_empty[1] == 1
     assert len({repr(complete_empty), repr(complete_some), repr(partial)}) == 3
     assert parse_delegation_push(reading(1, "unread")) is None
+
+
+# ── a push right behind the join reply ───────────────────────────────────
+#
+# The node re-reads the parent right after a join and may push at once. The
+# read loop can dispatch that push before _join resumes. The first two groups
+# of tests make that order CERTAIN: the channel's inbound handler is wrapped so
+# the push is dispatched in the same call as the join reply, before any other
+# task runs. The last group sends both frames over the socket, as the node
+# does, and is run repeatedly.
+
+
+@pytest.fixture
+def push_behind_reply(monkeypatch: pytest.MonkeyPatch):
+    """Dispatch *push* right after the next join reply, in the same call."""
+    from layr8.channel import PhoenixChannel
+
+    state: dict[str, Any] = {"push": None}
+    orig = PhoenixChannel._handle_inbound
+
+    def wrapped(self, join_ref, ref, topic, event, payload):  # type: ignore[no-untyped-def]
+        is_join_reply = (
+            event == "phx_reply"
+            and self._join_future is not None
+            and not self._join_future.done()
+            and ref == self._join_ref
+        )
+        orig(self, join_ref, ref, topic, event, payload)
+        if is_join_reply and state["push"] is not None:
+            orig(self, None, None, topic, "delegated_credentials", state["push"])
+
+    monkeypatch.setattr(PhoenixChannel, "_handle_inbound", wrapped)
+
+    def arm(push: dict[str, Any] | None) -> None:
+        state["push"] = push
+
+    return arm
+
+
+async def test_a_push_right_behind_the_first_join_reply_is_applied(
+    node: RefreshNode, push_behind_reply: Any
+) -> None:
+    push_behind_reply(reading(1, "complete", "p9"))
+    client = make_client(node)
+    await client.connect()
+    try:
+        assert ids(client.delegated_credentials()) == ["child-of-p9"]
+        assert await wire_tags(client, node) == ["p9"]
+    finally:
+        await client.close()
+
+
+async def test_a_push_right_behind_a_rejoin_reply_is_not_overwritten(
+    node: RefreshNode, push_behind_reply: Any
+) -> None:
+    client = make_client(node)
+    await client.connect()
+    try:
+        channel = client._channel
+        assert channel is not None
+        push_behind_reply(reading(1, "complete", "p9"))
+        await channel._join(channel._protocols)
+        assert ids(client.delegated_credentials()) == ["child-of-p9"]
+        assert await wire_tags(client, node) == ["p9"]
+    finally:
+        await client.close()
+
+
+async def test_a_push_right_behind_a_rejoin_reply_is_not_compared_with_the_old_revision(
+    node: RefreshNode, push_behind_reply: Any
+) -> None:
+    client = make_client(node)
+    await client.connect()
+    try:
+        await node.push(reading(3, "complete", "p3"))
+        assert ids(client.delegated_credentials()) == ["child-of-p3"]
+        channel = client._channel
+        assert channel is not None
+        push_behind_reply(reading(1, "complete", "p9"))
+        await channel._join(channel._protocols)
+        assert ids(client.delegated_credentials()) == ["child-of-p9"]
+        assert await wire_tags(client, node) == ["p9"]
+    finally:
+        await client.close()
+
+
+async def test_a_held_push_still_goes_through_the_revision_check(
+    node: RefreshNode, push_behind_reply: Any
+) -> None:
+    node.join_reading = reading(2, "complete", "p1")
+    push_behind_reply(reading(1, "complete", "p9"))
+    client = make_client(node)
+    await client.connect()
+    try:
+        assert ids(client.delegated_credentials()) == ["child-of-p1"]
+    finally:
+        await client.close()
+
+
+async def test_a_failed_join_discards_what_it_held(node: RefreshNode) -> None:
+    client = make_client(node)
+    await client.connect()
+    try:
+        channel = client._channel
+        assert channel is not None
+        node.server.on_msg = lambda _msg: None  # the node never answers
+
+        joining = asyncio.ensure_future(channel._join(channel._protocols))
+        await asyncio.sleep(0.01)
+        channel._handle_inbound(None, None, channel._topic, "delegated_credentials",
+                                reading(7, "complete", "p7"))
+        assert channel._held_pushes is not None and len(channel._held_pushes) == 1
+        joining.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await joining
+        assert channel._held_pushes is None
+        assert ids(client.delegated_credentials()) == ["child-of-p1"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("attempt", range(20))
+async def test_over_the_socket_a_push_behind_the_join_reply_is_applied(
+    node: RefreshNode, attempt: int
+) -> None:
+    node.push_after_join = reading(1, "complete", "p9")
+    client = make_client(node)
+    await client.connect()
+    try:
+        await asyncio.sleep(0.05)
+        assert ids(client.delegated_credentials()) == ["child-of-p9"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("attempt", range(20))
+async def test_over_the_socket_a_push_behind_a_rejoin_reply_is_applied(
+    node: RefreshNode, attempt: int
+) -> None:
+    client = make_client(node)
+    await client.connect()
+    try:
+        await node.push(reading(3, "complete", "p3"))
+        node.push_after_join = reading(1, "complete", "p9")
+        channel = client._channel
+        assert channel is not None
+        await channel._join(channel._protocols)
+        await asyncio.sleep(0.05)
+        assert ids(client.delegated_credentials()) == ["child-of-p9"]
+    finally:
+        await client.close()

@@ -108,6 +108,16 @@ class PhoenixChannel:
         self._refresh_requested: bool = False
         # Revision of the reading in _delegated; reset by every join.
         self._delegation_revision: int | None = None
+        # Pushes that arrived while a join was waiting for its reply, in arrival
+        # order; None when no join is in flight.
+        #
+        # The node can push right behind its join reply. _handle_inbound only
+        # completes _join_future, and _join resumes on a later loop turn, so
+        # the read loop can dispatch that push first: it would be compared with
+        # the previous join's state (or with none) and could then be
+        # overwritten by the older join reading. It is held here instead and
+        # applied once _join has installed its reading.
+        self._held_pushes: list[Any] | None = None
 
         self._ws: websockets.asyncio.client.ClientConnection | None = None
         self._ref_counter = 0
@@ -247,7 +257,21 @@ class PhoenixChannel:
 
         loop = asyncio.get_running_loop()
         self._join_future = loop.create_future()
+        # Hold pushes from here until this join has installed its reading.
+        self._held_pushes = []
+        try:
+            await self._join_and_install(ref, join_payload, request_refresh)
+        except BaseException:
+            self._held_pushes = None
+            raise
+        held, self._held_pushes = self._held_pushes or [], None
+        for payload in held:
+            self._apply_delegation_push(payload)
 
+    async def _join_and_install(
+        self, ref: str, join_payload: dict[str, Any], request_refresh: bool
+    ) -> None:
+        assert self._join_future is not None
         await self._write_msg(ref, ref, self._topic, "phx_join", join_payload)
 
         try:
@@ -496,7 +520,11 @@ class PhoenixChannel:
             self._on_message(payload)
         elif event == "delegated_credentials":
             # A replacement reading for a borrowed child. The channel decides
-            # whether it applies.
+            # whether it applies; while a join is in flight it is held until
+            # the join has installed its own reading (see _held_pushes).
+            if self._held_pushes is not None:
+                self._held_pushes.append(payload)
+                return
             self._apply_delegation_push(payload)
         elif event in ("phx_error", "phx_close"):
             if self._on_disconnect:
