@@ -11,6 +11,7 @@ from .child_did import (
 from .client import Client
 from .config import Config, GrantMissInfo
 from .delegated import (
+    DELEGATION_REFRESH_CAPABILITY,
     DelegatedCredential,
     DelegatedCredentialsReading,
     DelegationStatus,
@@ -71,6 +72,7 @@ __all__ = [
     "is_beneath_parent",
     "random_child_segment",
     "resolve_borrower_did",
+    "DELEGATION_REFRESH_CAPABILITY",
     "DelegatedCredential",
     "DelegatedCredentialsReading",
     "DelegationStatus",

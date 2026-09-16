@@ -125,6 +125,7 @@ class Client:
         # Disconnect / reconnect callbacks
         self._disconnect_fn: Callable[[Exception], None] | None = None
         self._reconnect_fn: Callable[[], None] | None = None
+        self._delegation_fn: Callable[[str, DelegatedCredentialsReading], None] | None = None
 
         # A mediated client handles the mediator's live `delivery` pushes
         # itself (re-inject + ack). Registered here, before connect(), so the
@@ -328,6 +329,7 @@ class Client:
             parent_did=self._cfg.parent_did,
             child_name_source=self._cfg.child_name_source,
             on_delegated_credentials=self._apply_delegated,
+            on_delegation_refreshed=self._delegation_refreshed,
         )
 
         await channel.connect(protocols)
@@ -377,6 +379,48 @@ class Client:
         never looked — not that the parent holds nothing.
         """
         return self._channel.supports_ephemeral_delegation if self._channel else False
+
+    def supports_ephemeral_delegation_refresh(self) -> bool:
+        """Whether the node advertised ``ephemeral_delegation_refresh/1`` at join.
+
+        When it did, the node pushes a replacement delegated set whenever the
+        parent's grants change; the client asks for this on every join that
+        names a ``parent_did``. ``False`` means the join reply is the only
+        reading this connection gets.
+        """
+        return self._channel.supports_ephemeral_delegation_refresh if self._channel else False
+
+    def on_delegation(
+        self, fn: Callable[[str, DelegatedCredentialsReading], None]
+    ) -> None:
+        """Register a callback for a pushed replacement delegated set.
+
+        Called with ``(did, reading)`` after the node pushed a new set for this
+        client's borrowed DID and it was applied: :meth:`delegated_credentials`
+        already returns it and the wallet already attaches it. A push replaces
+        the set, never adds to it. No call means the last reading still stands
+        — the node sends nothing when it cannot read the parent's wallet. Not
+        called for joins or rejoins; :meth:`on_reconnect` covers those.
+
+        Runs on the event loop's read task; it must not block. An exception in
+        it is reported to the error handler as ``HANDLER_EXCEPTION``.
+        """
+        self._delegation_fn = fn
+
+    def _delegation_refreshed(
+        self, did: str, reading: DelegatedCredentialsReading
+    ) -> None:
+        fn = self._delegation_fn
+        if fn is None:
+            return
+        try:
+            fn(did or self._agent_did, reading)
+        except Exception as err:  # noqa: BLE001 — a listener must not stop the read loop
+            self._on_error(SDKError(
+                kind=ErrorKind.HANDLER_EXCEPTION,
+                type="delegated_credentials",
+                cause=err,
+            ))
 
     def _apply_delegated(
         self, did: str, reading: DelegatedCredentialsReading | None

@@ -87,3 +87,49 @@ def parse_delegated_credentials(raw: Any) -> DelegatedCredentialsReading | None:
         if isinstance(entry, dict)
     ]
     return DelegatedCredentialsReading(status=status, credentials=parsed)
+
+
+#: The capability a node announces when it pushes a replacement reading to a
+#: live borrowed child whose join asked for it with ``delegation_refresh: true``.
+DELEGATION_REFRESH_CAPABILITY = "ephemeral_delegation_refresh/1"
+
+
+def _revision_of(raw: Any) -> int | None:
+    if not isinstance(raw, dict):
+        return None
+    revision = raw.get("revision")
+    # bool is an int subclass; True is not a revision.
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        return None
+    return revision
+
+
+def parse_delegation_push(raw: Any) -> tuple[DelegatedCredentialsReading, int] | None:
+    """A pushed ``delegated_credentials`` event as ``(reading, revision)``, or
+    ``None`` if it is not one to apply.
+
+    The payload is the join reply's reading plus ``revision``, so it goes
+    through :func:`parse_delegated_credentials`. On top of that:
+
+    - ``revision`` must be a non-negative integer. Without it a consumer cannot
+      tell a late push from a new one.
+    - ``status: "unread"`` is never pushed by the node: a refresh whose read
+      failed sends nothing, and the last reading stands. A push that says
+      ``unread`` anyway is dropped rather than applied, because applying it
+      would replace a set that came from a real read with an ``[]`` that
+      measures nothing, and take working authority away.
+    """
+    reading = parse_delegated_credentials(raw)
+    if reading is None or reading.status == "unread":
+        return None
+    revision = _revision_of(raw)
+    if revision is None:
+        return None
+    return reading, revision
+
+
+def join_revision(raw: Any) -> int:
+    """A join reply's ``delegated_credentials.revision``, or ``0`` when an older
+    node sent none."""
+    revision = _revision_of(raw)
+    return 0 if revision is None else revision

@@ -557,6 +557,28 @@ about it, so `GET /api/v1/credentials` will never return it and no endpoint will
 hand it back; rejoin to be issued a new one. It is not individually revocable —
 authority is withdrawn by revoking or expiring the parent's grant.
 
+**Staying current while connected.** A join that names a `parent_did` also
+asks the node to keep the set current (`delegation_refresh: true`). When the
+node announces it, `client.supports_ephemeral_delegation_refresh()` returns
+`True`, and the node pushes the whole new set whenever the parent's grants
+change. The client replaces the reading and the credentials it attaches, then
+calls the `on_delegation` callback:
+
+```python
+def delegation_changed(did: str, reading: DelegatedCredentialsReading) -> None:
+    # `reading` is what client.delegated_credentials() now returns.
+    ...
+
+client.on_delegation(delegation_changed)
+```
+
+A push replaces the set and never adds to it; `complete` with `[]` means the
+parent now holds nothing. No push means the last reading still stands — the
+node sends nothing when it cannot read the parent's wallet. A push older than
+the one already applied, or one that is not a well-formed reading, is ignored.
+A message already choosing its attachments when a push arrives goes out with
+the old set or the new one, never a mix.
+
 A refused join names its reason: `e.join.plugin.parent.not-persistent`,
 `e.join.plugin.parent.not-found`, `e.join.plugin.parent.not-hosted-here`,
 `e.join.plugin.child.not-beneath-parent`,

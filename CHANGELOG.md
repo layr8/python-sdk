@@ -6,6 +6,23 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ## [Unreleased]
 
+### Added
+
+- **A borrowed child's delegated set is kept current while it is connected.**
+  A join that names a `parent_did` now sends `delegation_refresh: true`. When
+  the node announces `ephemeral_delegation_refresh/1`, it pushes a
+  `delegated_credentials` event with the whole new set whenever the parent's
+  grants change. The client replaces the reading and the attached credentials,
+  ignores a push whose `revision` is not newer than the one it holds, ignores a
+  push that does not parse (and an `unread` push, which the node never sends),
+  and calls `on_delegation(did, reading)`. A rejoin starts the revision again
+  from the join reply. A push that arrives while a join is waiting for its
+  reply is held until the join has installed its reading, then applied in
+  order, so it is neither dropped nor overwritten by the older join reading.
+- `Client.supports_ephemeral_delegation_refresh()`, `Client.on_delegation()`,
+  `layr8.DELEGATION_REFRESH_CAPABILITY` and
+  `layr8.delegated.parse_delegation_push()`.
+
 ## [0.3.1] - 2026-09-16
 
 ### Added

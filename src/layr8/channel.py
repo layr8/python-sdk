@@ -15,7 +15,13 @@ import websockets
 import websockets.asyncio.client
 
 from .backoff import Backoff
-from .delegated import DelegatedCredentialsReading, parse_delegated_credentials
+from .delegated import (
+    DELEGATION_REFRESH_CAPABILITY,
+    DelegatedCredentialsReading,
+    join_revision,
+    parse_delegated_credentials,
+    parse_delegation_push,
+)
 
 
 @dataclass
@@ -73,6 +79,9 @@ class PhoenixChannel:
         on_delegated_credentials: Callable[
             [str, DelegatedCredentialsReading | None], None
         ] | None = None,
+        on_delegation_refreshed: Callable[
+            [str, DelegatedCredentialsReading], None
+        ] | None = None,
     ) -> None:
         self._ws_url = ws_url
         self._api_key = api_key
@@ -92,6 +101,23 @@ class PhoenixChannel:
         # one. See DelegatedCredentialsReading.
         self._delegated: DelegatedCredentialsReading | None = None
         self._ephemeral_delegation: bool = False
+        self._on_delegation_refreshed = on_delegation_refreshed
+        # Whether the node announced ephemeral_delegation_refresh/1, and
+        # whether the last join asked for it. A push is applied only then.
+        self._delegation_refresh: bool = False
+        self._refresh_requested: bool = False
+        # Revision of the reading in _delegated; reset by every join.
+        self._delegation_revision: int | None = None
+        # Pushes that arrived while a join was waiting for its reply, in arrival
+        # order; None when no join is in flight.
+        #
+        # The node can push right behind its join reply. _handle_inbound only
+        # completes _join_future, and _join resumes on a later loop turn, so
+        # the read loop can dispatch that push first: it would be compared with
+        # the previous join's state (or with none) and could then be
+        # overwritten by the older join reading. It is held here instead and
+        # applied once _join has installed its reading.
+        self._held_pushes: list[Any] | None = None
 
         self._ws: websockets.asyncio.client.ClientConnection | None = None
         self._ref_counter = 0
@@ -222,10 +248,30 @@ class PhoenixChannel:
             "reply_protocol": True,
             "did_spec": did_spec,
         }
+        # Ask the node to keep a borrowed child's set current. Only a join that
+        # names a parent borrows anything, so the key is not sent otherwise and
+        # an unparented join is byte for byte what it was before.
+        request_refresh = bool(self._parent_did)
+        if request_refresh:
+            join_payload["delegation_refresh"] = True
 
         loop = asyncio.get_running_loop()
         self._join_future = loop.create_future()
+        # Hold pushes from here until this join has installed its reading.
+        self._held_pushes = []
+        try:
+            await self._join_and_install(ref, join_payload, request_refresh)
+        except BaseException:
+            self._held_pushes = None
+            raise
+        held, self._held_pushes = self._held_pushes or [], None
+        for payload in held:
+            self._apply_delegation_push(payload)
 
+    async def _join_and_install(
+        self, ref: str, join_payload: dict[str, Any], request_refresh: bool
+    ) -> None:
+        assert self._join_future is not None
         await self._write_msg(ref, ref, self._topic, "phx_join", join_payload)
 
         try:
@@ -249,6 +295,8 @@ class PhoenixChannel:
         capabilities = response.get("capabilities", []) if isinstance(response, dict) else []
         self._reply_protocol = "reply_protocol/1" in capabilities
         self._ephemeral_delegation = "ephemeral_delegation/1" in capabilities
+        self._delegation_refresh = DELEGATION_REFRESH_CAPABILITY in capabilities
+        self._refresh_requested = request_refresh
 
         # The node omits the key when the join named no parent, and otherwise
         # sends a reading that says whether it could read the parent's wallet at
@@ -256,6 +304,11 @@ class PhoenixChannel:
         # the bug this whole object exists to avoid.
         raw_delegated = response.get("delegated_credentials") if isinstance(response, dict) else None
         self._delegated = parse_delegated_credentials(raw_delegated)
+        # A rejoin starts the revision again from the join reply, so a push on
+        # the new connection is never compared with one from the old.
+        self._delegation_revision = (
+            None if self._delegated is None else join_revision(raw_delegated)
+        )
         # UNCONDITIONAL, None included. A rejoin whose reply carries no reading
         # is a rejoin after which the previous set must go: it was minted for a
         # DID document this rejoin may have replaced, and the node that would
@@ -310,6 +363,48 @@ class PhoenixChannel:
     def supports_ephemeral_delegation(self) -> bool:
         """Whether the node advertised ``ephemeral_delegation/1`` at join."""
         return self._ephemeral_delegation
+
+    @property
+    def supports_ephemeral_delegation_refresh(self) -> bool:
+        """Whether the node advertised ``ephemeral_delegation_refresh/1`` at join."""
+        return self._delegation_refresh
+
+    @property
+    def delegation_revision(self) -> int | None:
+        """Revision of :attr:`delegated_credentials`; ``None`` with no reading."""
+        return self._delegation_revision
+
+    def _apply_delegation_push(self, payload: Any) -> None:
+        """Apply an inbound ``delegated_credentials`` push.
+
+        The push carries the WHOLE current set, so applying it replaces what is
+        held; it never appends. It is dropped, and the last reading stands,
+        when this join did not ask for refreshes, there is no reading to
+        replace (the join named no parent), it does not parse, or its revision
+        is not greater than the one held.
+
+        The wallet swap in ``on_delegated_credentials`` is one assignment of a
+        new list, on the event loop. A send already choosing its attachments
+        took the old list first, so it uses the old set or the new one, never
+        a mix.
+        """
+        if not self._refresh_requested or self._closed:
+            return
+        if self._delegated is None or self._delegation_revision is None:
+            return
+        push = parse_delegation_push(payload)
+        if push is None:
+            return
+        reading, revision = push
+        if revision <= self._delegation_revision:
+            return
+        self._delegated = reading
+        self._delegation_revision = revision
+        did = self._agent_did or self._assigned_did
+        if self._on_delegated_credentials is not None:
+            self._on_delegated_credentials(did, reading)
+        if self._on_delegation_refreshed is not None:
+            self._on_delegation_refreshed(did, reading)
 
     async def close(self) -> None:
         """Send phx_leave and shut down gracefully."""
@@ -423,6 +518,14 @@ class PhoenixChannel:
                     future.set_result(ServerReply(status=status, reason=reason))
         elif event == "message":
             self._on_message(payload)
+        elif event == "delegated_credentials":
+            # A replacement reading for a borrowed child. The channel decides
+            # whether it applies; while a join is in flight it is held until
+            # the join has installed its own reading (see _held_pushes).
+            if self._held_pushes is not None:
+                self._held_pushes.append(payload)
+                return
+            self._apply_delegation_push(payload)
         elif event in ("phx_error", "phx_close"):
             if self._on_disconnect:
                 self._on_disconnect(Exception(f"channel {event}"))
