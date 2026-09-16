@@ -102,6 +102,16 @@ class Message:
     taken. The message is still delivered either way: an authorization
     denial must not vanish because a hint travelling beside it was
     malformed.
+
+    ``trace_context`` is the DIDComm ``trace_context`` header: a W3C trace
+    context as a dict with the W3C header names as keys,
+    ``{"traceparent": "00-...", "tracestate": "..."}`` (``tracestate`` is
+    optional). That dict is a ready-made carrier for an OpenTelemetry
+    propagator. ``None`` means the message carried none, or carried a value
+    this SDK could not read (see ``read_trace_context``). The SDK carries the
+    value and does not validate the ``traceparent`` format; the node does. A
+    handler's reply and the problem report for a failed handler copy the
+    request's value when the reply does not set its own.
     """
 
     id: str = ""
@@ -113,6 +123,7 @@ class Message:
     body: Any = None
     attachments: list[Attachment] | None = field(default_factory=list)
     attachments_unread: str | None = None
+    trace_context: dict[str, str] | None = None
     context: MessageContext | None = None
 
     # Internal fields (not part of the public API)
@@ -230,6 +241,26 @@ def _parse_attachments(raw: Any) -> tuple[list[Attachment] | None, str | None]:
     return out, None
 
 
+def read_trace_context(value: Any) -> dict[str, str] | None:
+    """
+    Read a ``trace_context`` header value.
+
+    Returns a dict with only ``traceparent`` and (when it is a string)
+    ``tracestate``, or ``None`` for anything that is not a dict with a string
+    ``traceparent``. It never raises: a malformed header must not cost the
+    reader the message. Other members are dropped and never forwarded.
+    """
+    if not isinstance(value, dict):
+        return None
+    traceparent = value.get("traceparent")
+    if not isinstance(traceparent, str):
+        return None
+    tracestate = value.get("tracestate")
+    if isinstance(tracestate, str):
+        return {"traceparent": traceparent, "tracestate": tracestate}
+    return {"traceparent": traceparent}
+
+
 def marshal_didcomm(msg: Message) -> dict[str, Any]:
     """Serialize a Message into DIDComm wire format (dict ready for JSON)."""
     env: dict[str, Any] = {
@@ -245,6 +276,9 @@ def marshal_didcomm(msg: Message) -> dict[str, Any]:
         env["pthid"] = msg.parent_thread_id
     if msg.attachments:
         env["attachments"] = [_marshal_attachment(a) for a in msg.attachments]
+    trace_context = read_trace_context(msg.trace_context)
+    if trace_context is not None:
+        env["trace_context"] = trace_context
     return env
 
 
@@ -264,6 +298,7 @@ def parse_didcomm(data: dict[str, Any]) -> Message:
         body=pt.get("body"),
         attachments=attachments,
         attachments_unread=attachments_unread,
+        trace_context=read_trace_context(pt.get("trace_context")),
         _body_raw=pt.get("body"),
     )
 
