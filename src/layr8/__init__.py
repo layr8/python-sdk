@@ -42,7 +42,14 @@ from .mcp import DEFAULT_MCP_BASE, McpBinding, McpError, McpPeer
 # is set.
 from . import mediation
 from .mediation import DELIVERY_TYPE as MEDIATION_DELIVERY_TYPE, MEDIATION_PROTOCOLS
-from .message import Attachment, AttachmentData, Credential, Message, MessageContext
+from .message import (
+    Attachment,
+    AttachmentData,
+    Credential,
+    Message,
+    MessageContext,
+    read_trace_context,
+)
 from .presentations import VerifiedPresentation
 from .rest import RESTError, post_didcomm
 from .sentinel import PASS
@@ -77,6 +84,7 @@ __all__ = [
     "DEFAULT_MCP_BASE",
     "Message",
     "MessageContext",
+    "read_trace_context",
     "Credential",
     "VerifiedCredential",
     "StoredCredential",

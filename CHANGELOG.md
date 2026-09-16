@@ -6,6 +6,28 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-16
+
+### Added
+
+- **The `trace_context` plaintext header is carried.** A DIDComm message may
+  carry a W3C trace context in a top-level `trace_context` object
+  (`traceparent`, optional `tracestate`). The SDK used to drop it on parse and
+  never wrote it. It is now `Message.trace_context`, a dict with the keys
+  `traceparent` and optionally `tracestate`: `parse_didcomm` reads it,
+  `marshal_didcomm` writes it, and `send()` / `request()` carry a value the
+  caller sets. `read_trace_context` (exported) is the one reader.
+- **A handler's reply joins the request's trace.** The auto-filled reply
+  copies the request's `trace_context` unchanged unless the handler set its
+  own, next to where it already defaults `thread_id`. The problem report sent
+  for a failed handler copies it too.
+
+  A value that is not a dict with a string `traceparent` is dropped, never a
+  parse error, and members other than `traceparent` and `tracestate` are not
+  forwarded. The SDK does not validate the `traceparent` format. It does not
+  yet create a trace context for a new request that has none. The node, Go and
+  Elixir SDKs make the same change.
+
 ## [0.3.0] - 2026-09-15
 
 ### Changed
@@ -274,6 +296,7 @@ patch (RELEASING.md, "Choosing the version"). The Go SDK shipped the same
 - `RestClient.__init__` takes an optional `timeout_ms`. Additive; existing
   positional calls are unaffected.
 
+[0.3.1]: https://github.com/layr8/python-sdk/releases/tag/v0.3.1
 [0.3.0]: https://github.com/layr8/python-sdk/releases/tag/v0.3.0
 [0.2.16]: https://github.com/layr8/python-sdk/releases/tag/v0.2.16
 [0.2.15]: https://github.com/layr8/python-sdk/releases/tag/v0.2.15

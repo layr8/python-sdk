@@ -642,6 +642,10 @@ class Client:
             resp.to = [original.from_]
         if not resp.thread_id:
             resp.thread_id = original.thread_id or original.id
+        # The reply joins the request's trace: the request's trace context is
+        # copied unchanged unless the handler set its own.
+        if resp.trace_context is None and original.trace_context is not None:
+            resp.trace_context = dict(original.trace_context)
         if not resp.id:
             resp.id = generate_id()
 
@@ -678,6 +682,10 @@ class Client:
             from_=self._agent_did,
             to=[original.from_] if original.from_ else [],
             thread_id=thread_id,
+            # The report stays in the request's trace.
+            trace_context=(
+                dict(original.trace_context) if original.trace_context is not None else None
+            ),
             body={"code": "e.p.xfer.cant-process", "comment": str(err)},
         )
         await self._send_message(report)
