@@ -6,6 +6,17 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Client.close()` now sends a leave the node acts on.** `phx_leave` was
+  sent with a `null` join ref. Phoenix acts on a leave only when its join ref
+  matches the one the topic was joined with, and drops any other leave without
+  replying, so the node never ran the channel's leave: it kept the DID bound
+  and kept refreshing its delegated set until the WebSocket itself closed.
+  `close()` closes the socket right after the leave, so the effect was small,
+  but the leave now carries the join ref of the current connection. This SDK
+  has no call that leaves one DID while the connection stays open.
+
 ## [0.3.2] - 2026-09-16
 
 ### Added

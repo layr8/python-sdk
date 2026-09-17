@@ -121,6 +121,11 @@ class PhoenixChannel:
 
         self._ws: websockets.asyncio.client.ClientConnection | None = None
         self._ref_counter = 0
+        # Ref of the last phx_join written on the current connection.
+        # phx_leave must carry it: Phoenix acts on a leave only when its
+        # join_ref equals the one the topic was joined with, and silently
+        # drops any other leave, leaving the channel (and the DID binding)
+        # running until the socket closes.
         self._join_ref = ""
         self._assigned_did = ""
         self._closed = False
@@ -437,7 +442,10 @@ class PhoenixChannel:
         if self._ws:
             try:
                 ref = self._next_ref()
-                await self._write_msg(None, ref, self._topic, "phx_leave", {})
+                # With the topic's join ref, or Phoenix ignores the leave.
+                await self._write_msg(
+                    self._join_ref or None, ref, self._topic, "phx_leave", {}
+                )
             except Exception:
                 pass
             await self._ws.close()
