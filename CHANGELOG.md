@@ -6,6 +6,8 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-17
+
 ### Fixed
 
 - **`Client.close()` now sends a leave the node acts on.** `phx_leave` was
@@ -326,6 +328,7 @@ patch (RELEASING.md, "Choosing the version"). The Go SDK shipped the same
 - `RestClient.__init__` takes an optional `timeout_ms`. Additive; existing
   positional calls are unaffected.
 
+[0.3.3]: https://github.com/layr8/python-sdk/releases/tag/v0.3.3
 [0.3.2]: https://github.com/layr8/python-sdk/releases/tag/v0.3.2
 [0.3.1]: https://github.com/layr8/python-sdk/releases/tag/v0.3.1
 [0.3.0]: https://github.com/layr8/python-sdk/releases/tag/v0.3.0
