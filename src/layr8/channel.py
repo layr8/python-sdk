@@ -24,6 +24,11 @@ from .delegated import (
 )
 
 
+#: The upgrade request header that carries the API key — the same header the
+#: REST calls use. The key is never put in the socket URL.
+API_KEY_HEADER = "x-api-key"
+
+
 @dataclass
 class ServerReply:
     """Parsed reply from the Phoenix server for a sent message."""
@@ -156,9 +161,12 @@ class PhoenixChannel:
         """Open the WebSocket and join the channel (used by connect and reconnect)."""
         self._ref_counter = 0
 
+        # The API key travels in the x-api-key upgrade header, never in the
+        # URL. A URL is what proxies, load balancers and request logs record,
+        # and what websockets quotes in InvalidURI and handshake errors — so a
+        # key in the query string ended up in logs and tracebacks.
         parsed = urlparse(self._ws_url)
         qs = parse_qs(parsed.query)
-        qs["api_key"] = [self._api_key]
         qs["vsn"] = ["2.0.0"]
         new_query = urlencode(qs, doseq=True)
         full_url = urlunparse(parsed._replace(query=new_query))
@@ -178,6 +186,9 @@ class PhoenixChannel:
             # the policy enforced in go-sdk.
             self._ws = await websockets.asyncio.client.connect(
                 full_url,
+                # Built inline rather than bound to a local, so an error
+                # reporter that captures frame locals does not capture it.
+                additional_headers={API_KEY_HEADER: self._api_key},
                 sock=sock,
                 open_timeout=10,
                 ping_interval=30,

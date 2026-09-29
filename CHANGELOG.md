@@ -6,6 +6,26 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ## [Unreleased]
 
+### Changed
+
+- **The API key is sent in the `x-api-key` header, never in the URL.** The
+  plugin socket's WebSocket upgrade used to carry the key as the `api_key`
+  query parameter, where proxies, load balancers and request logs record it.
+  It now travels in the `x-api-key` upgrade header, the same header the REST
+  calls already used; the URL carries only `vsn=2.0.0`. **Requires a node
+  that accepts `x-api-key` on the plugin socket** (cloud-node PR link to be
+  added by the coordinator). A node that reads the key only from the query
+  string refuses this client.
+
+### Security
+
+- **A misconfigured `node_url` no longer puts the key in the error
+  (LAYR8-1306).** websockets quotes the whole URL in `InvalidURI` and the SDK
+  copied that message into `Layr8ConnectionError`, so a `node_url` without a
+  `ws://`/`wss://` scheme raised an error, and printed a traceback, that
+  contained the key. The key is no longer in the URL, so neither contains it.
+- `repr()` of `Config` and `ResolvedConfig` no longer includes `api_key`.
+
 ## [0.3.3] - 2026-09-17
 
 ### Fixed

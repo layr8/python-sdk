@@ -78,7 +78,9 @@ class Config:
     """
 
     node_url: str = ""
-    api_key: str = ""
+    #: Excluded from ``repr``: a Config is the kind of object that gets logged
+    #: or captured in an error report, and the key must never be printed.
+    api_key: str = field(default="", repr=False)
     agent_did: str = ""
     protocols: list[str] | None = None
 
@@ -153,7 +155,8 @@ class ResolvedConfig:
     """Resolved configuration with required fields guaranteed present."""
 
     node_url: str
-    api_key: str
+    #: Excluded from ``repr`` for the same reason as :attr:`Config.api_key`.
+    api_key: str = field(repr=False)
     agent_did: str
     protocols: list[str]
     #: The parent whose authority *agent_did* borrows, or ``""``.
