@@ -121,7 +121,7 @@ async def test_upgrade_carries_key_in_header_and_not_in_url() -> None:
 @pytest.mark.parametrize(
     "node_url",
     [
-        # LAYR8-1306: a node_url with no scheme made websockets raise
+        # A node_url with no scheme made websockets raise
         # InvalidURI quoting the full URL, key included.
         "node.localhost:4000/plugin_socket/websocket",
         "ftp://node.localhost/plugin_socket/websocket",

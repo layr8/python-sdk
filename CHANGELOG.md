@@ -19,8 +19,8 @@ This file starts here. Earlier releases are recorded only in git history.
 
 ### Security
 
-- **A misconfigured `node_url` no longer puts the key in the error
-  (LAYR8-1306).** websockets quotes the whole URL in `InvalidURI` and the SDK
+- **A misconfigured `node_url` no longer puts the key in the error.**
+  websockets quotes the whole URL in `InvalidURI` and the SDK
   copied that message into `Layr8ConnectionError`, so a `node_url` without a
   `ws://`/`wss://` scheme raised an error, and printed a traceback, that
   contained the key. The key is no longer in the URL, so neither contains it.
